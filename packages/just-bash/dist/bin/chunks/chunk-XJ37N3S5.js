@@ -1,0 +1,7 @@
+#!/usr/bin/env node
+import{createRequire} from"node:module";const require=createRequire(import.meta.url);
+import{a as f}from"./chunk-H7JTIXAO.js";import{a as d}from"./chunk-NE4R2FVV.js";import{a as m,b as p}from"./chunk-MUFNRCMY.js";var b={name:"cat",summary:"concatenate files and print on the standard output",usage:"cat [OPTION]... [FILE]...",options:["-n, --number           number all output lines","    --help             display this help and exit"]},g={number:{short:"n",long:"number",type:"boolean"}},L={name:"cat",async execute(t,o){if(p(t))return m(b);let e=d("cat",t,g);if(!e.ok)return e.error;let r=e.result.flags.number,s=e.result.positional,a=await f(o,s,{cmdName:"cat",allowStdinMarker:!0,stopOnError:!1}),n="",l=1;for(let{content:i}of a.files){let u=i;if(r){let c=y(u,l);n+=c.content,l=c.nextLineNumber}else n+=u}return{stdout:n,stderr:a.stderr,exitCode:a.exitCode,stdoutEncoding:"binary"}}};function y(t,o){let e=t.split(`
+`),r=t.endsWith(`
+`),s=r?e.slice(0,-1):e;return{content:s.map((n,l)=>`${String(o+l).padStart(6," ")}	${n}`).join(`
+`)+(r?`
+`:""),nextLineNumber:o+s.length}}var T={name:"cat",flags:[{flag:"-n",type:"boolean"},{flag:"-A",type:"boolean"},{flag:"-b",type:"boolean"},{flag:"-s",type:"boolean"},{flag:"-v",type:"boolean"},{flag:"-e",type:"boolean"},{flag:"-t",type:"boolean"}],stdinType:"text",needsFiles:!0};export{L as a,T as b};

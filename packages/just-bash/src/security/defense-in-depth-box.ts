@@ -759,7 +759,7 @@ export class DefenseInDepthBox {
         }
         return Reflect.get(target, prop, receiver);
       },
-      set(target, prop, value, receiver) {
+      set(target, prop, value) {
         if (box.shouldBlock()) {
           const fullPath = `${path}.${String(prop)}`;
           const message = `${fullPath} modification is blocked during script execution`;
@@ -770,7 +770,13 @@ export class DefenseInDepthBox {
           );
           throw new SecurityViolationError(message, violation);
         }
-        return Reflect.set(target, prop, value, receiver);
+        // Set directly on the target instead of forwarding `receiver` (the
+        // proxy). With the proxy as receiver, ordinary [[Set]] semantics for
+        // an existing key degrade into receiver.[[DefineOwnProperty]] with a
+        // value-only descriptor, which process.env's interceptor rejects:
+        // "'process.env' only accepts a configurable, writable, and
+        // enumerable data descriptor".
+        return Reflect.set(target, prop, value);
       },
       // Block enumeration (Object.keys, Object.entries, for...in, etc.)
       ownKeys(target) {

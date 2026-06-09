@@ -339,9 +339,11 @@ export class WorkerDefenseInDepth {
           self.inTrap = false;
         }
       },
-      set(target, prop, value, receiver) {
+      set(target, prop, value) {
+        // Set directly on the target instead of forwarding `receiver` (the
+        // proxy); see createBlockingObjectProxy in defense-in-depth-box.ts.
         if (self.inTrap) {
-          return Reflect.set(target, prop, value, receiver);
+          return Reflect.set(target, prop, value);
         }
         self.inTrap = true;
         try {
@@ -356,7 +358,7 @@ export class WorkerDefenseInDepth {
           if (!auditMode) {
             throw new WorkerSecurityViolationError(message, violation);
           }
-          return Reflect.set(target, prop, value, receiver);
+          return Reflect.set(target, prop, value);
         } finally {
           self.inTrap = false;
         }

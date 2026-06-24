@@ -1,0 +1,474 @@
+/**
+ * jq - Command-line JSON processor
+ *
+ * Full jq implementation with proper parser and evaluator.
+ */
+import { decodeBytesToUtf8 } from "../../encoding.js";
+import { sanitizeErrorMessage } from "../../fs/sanitize-error.js";
+import { ExecutionLimitError } from "../../interpreter/errors.js";
+import { assertDefenseContext, awaitWithDefenseContext, } from "../../security/defense-context.js";
+import { SecurityViolationError } from "../../security/defense-in-depth-box.js";
+import { readFiles } from "../../utils/file-reader.js";
+import { hasHelpFlag, showHelp, unknownOption } from "../help.js";
+import { evaluate, parse, } from "../query-engine/index.js";
+import { sanitizeParsedData } from "../query-engine/safe-object.js";
+function escapeControlChar(char) {
+    switch (char) {
+        case "\b":
+            return "\\b";
+        case "\f":
+            return "\\f";
+        case "\n":
+            return "\\n";
+        case "\r":
+            return "\\r";
+        case "\t":
+            return "\\t";
+        default:
+            return `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`;
+    }
+}
+function sanitizeJsonControlChars(input) {
+    let output = "";
+    let inString = false;
+    let isEscaped = false;
+    for (let i = 0; i < input.length; i++) {
+        const char = input[i];
+        if (isEscaped) {
+            output += char;
+            isEscaped = false;
+            continue;
+        }
+        if (char === "\\") {
+            output += char;
+            isEscaped = true;
+            continue;
+        }
+        if (char === '"') {
+            output += char;
+            inString = !inString;
+            continue;
+        }
+        if (inString && char.charCodeAt(0) <= 0x1f) {
+            output += escapeControlChar(char);
+            continue;
+        }
+        output += char;
+    }
+    return output;
+}
+function parseJsonSlice(input, startPos, endPos) {
+    return JSON.parse(sanitizeJsonControlChars(input.slice(startPos, endPos)));
+}
+/**
+ * Parse a JSON stream (concatenated JSON values).
+ * Real jq can handle `{...}{...}` or `{...}\n{...}` or pretty-printed concatenated JSONs.
+ */
+function parseJsonStream(input) {
+    const results = [];
+    let pos = 0;
+    const len = input.length;
+    while (pos < len) {
+        // Skip whitespace
+        while (pos < len && /\s/.test(input[pos]))
+            pos++;
+        if (pos >= len)
+            break;
+        const startPos = pos;
+        const char = input[pos];
+        if (char === "{" || char === "[") {
+            // Parse object or array by finding matching close bracket
+            const openBracket = char;
+            const closeBracket = char === "{" ? "}" : "]";
+            let depth = 1;
+            let inString = false;
+            let isEscaped = false;
+            pos++;
+            while (pos < len && depth > 0) {
+                const c = input[pos];
+                if (isEscaped) {
+                    isEscaped = false;
+                }
+                else if (c === "\\") {
+                    isEscaped = true;
+                }
+                else if (c === '"') {
+                    inString = !inString;
+                }
+                else if (!inString) {
+                    if (c === openBracket)
+                        depth++;
+                    else if (c === closeBracket)
+                        depth--;
+                }
+                pos++;
+            }
+            if (depth !== 0) {
+                throw new Error(`Unexpected end of JSON input at position ${pos} (unclosed ${openBracket})`);
+            }
+            results.push(sanitizeParsedData(parseJsonSlice(input, startPos, pos)));
+        }
+        else if (char === '"') {
+            // Parse string
+            let isEscaped = false;
+            pos++;
+            while (pos < len) {
+                const c = input[pos];
+                if (isEscaped) {
+                    isEscaped = false;
+                }
+                else if (c === "\\") {
+                    isEscaped = true;
+                }
+                else if (c === '"') {
+                    pos++;
+                    break;
+                }
+                pos++;
+            }
+            results.push(sanitizeParsedData(parseJsonSlice(input, startPos, pos)));
+        }
+        else if (char === "-" || (char >= "0" && char <= "9")) {
+            // Parse number
+            while (pos < len && /[\d.eE+-]/.test(input[pos]))
+                pos++;
+            results.push(sanitizeParsedData(parseJsonSlice(input, startPos, pos)));
+        }
+        else if (input.slice(pos, pos + 4) === "true") {
+            results.push(true);
+            pos += 4;
+        }
+        else if (input.slice(pos, pos + 5) === "false") {
+            results.push(false);
+            pos += 5;
+        }
+        else if (input.slice(pos, pos + 4) === "null") {
+            results.push(null);
+            pos += 4;
+        }
+        else {
+            // Try to provide context about what we found
+            const context = input.slice(pos, pos + 10);
+            throw new Error(`Invalid JSON at position ${startPos}: unexpected '${context.split(/\s/)[0]}'`);
+        }
+    }
+    return results;
+}
+const jqHelp = {
+    name: "jq",
+    summary: "command-line JSON processor",
+    usage: "jq [OPTIONS] FILTER [FILE...]",
+    options: [
+        "-R, --raw-input   read each line as string instead of JSON",
+        "-r, --raw-output  output strings without quotes",
+        "-c, --compact-output  compact instead of pretty-printed output",
+        "-e, --exit-status set exit status based on output",
+        "-s, --slurp       read entire input into array",
+        "-n, --null-input  don't read any input",
+        "-j, --join-output don't print newlines after each output",
+        "-a, --ascii       force ASCII output",
+        "-S, --sort-keys   sort object keys",
+        "-C, --color       colorize output (ignored)",
+        "-M, --monochrome  monochrome output (ignored)",
+        "    --tab         use tabs for indentation",
+        "    --help        display this help and exit",
+    ],
+};
+function formatValue(v, compact, raw, sortKeys, useTab, indent = 0) {
+    if (v === null)
+        return "null";
+    if (v === undefined)
+        return "null";
+    if (typeof v === "boolean")
+        return String(v);
+    if (typeof v === "number") {
+        if (!Number.isFinite(v))
+            return "null";
+        return String(v);
+    }
+    if (typeof v === "string")
+        return raw ? v : JSON.stringify(v);
+    const indentStr = useTab ? "\t" : "  ";
+    if (Array.isArray(v)) {
+        if (v.length === 0)
+            return "[]";
+        if (compact) {
+            return `[${v.map((x) => formatValue(x, true, false, sortKeys, useTab)).join(",")}]`;
+        }
+        const items = v.map((x) => indentStr.repeat(indent + 1) +
+            formatValue(x, false, false, sortKeys, useTab, indent + 1));
+        return `[\n${items.join(",\n")}\n${indentStr.repeat(indent)}]`;
+    }
+    if (typeof v === "object") {
+        let keys = Object.keys(v);
+        if (sortKeys)
+            keys = keys.sort();
+        if (keys.length === 0)
+            return "{}";
+        if (compact) {
+            // @banned-pattern-ignore: iterating via Object.keys() which only returns own properties
+            return `{${keys.map((k) => `${JSON.stringify(k)}:${formatValue(v[k], true, false, sortKeys, useTab)}`).join(",")}}`;
+        }
+        const items = keys.map((k) => {
+            // @banned-pattern-ignore: iterating via Object.keys() which only returns own properties
+            const val = formatValue(v[k], false, false, sortKeys, useTab, indent + 1);
+            return `${indentStr.repeat(indent + 1)}${JSON.stringify(k)}: ${val}`;
+        });
+        return `{\n${items.join(",\n")}\n${indentStr.repeat(indent)}}`;
+    }
+    return String(v);
+}
+export const jqCommand = {
+    name: "jq",
+    async execute(args, ctx) {
+        assertDefenseContext(ctx.requireDefenseContext, "jq", "execution entry");
+        const withDefenseContext = (phase, op) => awaitWithDefenseContext(ctx.requireDefenseContext, "jq", phase, op);
+        if (hasHelpFlag(args))
+            return showHelp(jqHelp);
+        let raw = false;
+        let rawInput = false;
+        let compact = false;
+        let exitStatus = false;
+        let slurp = false;
+        let nullInput = false;
+        let joinOutput = false;
+        let sortKeys = false;
+        let useTab = false;
+        let filter = ".";
+        let filterSet = false;
+        const files = [];
+        for (let i = 0; i < args.length; i++) {
+            const a = args[i];
+            if (a === "-R" || a === "--raw-input")
+                rawInput = true;
+            else if (a === "-r" || a === "--raw-output")
+                raw = true;
+            else if (a === "-c" || a === "--compact-output")
+                compact = true;
+            else if (a === "-e" || a === "--exit-status")
+                exitStatus = true;
+            else if (a === "-s" || a === "--slurp")
+                slurp = true;
+            else if (a === "-n" || a === "--null-input")
+                nullInput = true;
+            else if (a === "-j" || a === "--join-output")
+                joinOutput = true;
+            else if (a === "-a" || a === "--ascii") {
+                /* ignored */
+            }
+            else if (a === "-S" || a === "--sort-keys")
+                sortKeys = true;
+            else if (a === "-C" || a === "--color") {
+                /* ignored */
+            }
+            else if (a === "-M" || a === "--monochrome") {
+                /* ignored */
+            }
+            else if (a === "--tab")
+                useTab = true;
+            else if (a === "-")
+                files.push("-");
+            else if (a.startsWith("--"))
+                return unknownOption("jq", a);
+            else if (a.startsWith("-")) {
+                for (const c of a.slice(1)) {
+                    if (c === "R")
+                        rawInput = true;
+                    else if (c === "r")
+                        raw = true;
+                    else if (c === "c")
+                        compact = true;
+                    else if (c === "e")
+                        exitStatus = true;
+                    else if (c === "s")
+                        slurp = true;
+                    else if (c === "n")
+                        nullInput = true;
+                    else if (c === "j")
+                        joinOutput = true;
+                    else if (c === "a") {
+                        /* ignored */
+                    }
+                    else if (c === "S")
+                        sortKeys = true;
+                    else if (c === "C") {
+                        /* ignored */
+                    }
+                    else if (c === "M") {
+                        /* ignored */
+                    }
+                    else
+                        return unknownOption("jq", `-${c}`);
+                }
+            }
+            else if (!filterSet) {
+                filter = a;
+                filterSet = true;
+            }
+            else {
+                files.push(a);
+            }
+        }
+        // Build list of inputs: stdin or files. jq parses JSON, so the input
+        // bytes are decoded to UTF-8 before parsing — without this, multi-byte
+        // sequences inside string values get re-encoded twice and emit mojibake.
+        let inputs = [];
+        if (nullInput) {
+            // No input
+        }
+        else if (files.length === 0 || (files.length === 1 && files[0] === "-")) {
+            inputs.push({ source: "stdin", content: decodeBytesToUtf8(ctx.stdin) });
+        }
+        else {
+            // Read all files in parallel using shared utility
+            const result = await withDefenseContext("file read", () => readFiles(ctx, files, {
+                cmdName: "jq",
+                stopOnError: true,
+            }));
+            if (result.exitCode !== 0) {
+                return {
+                    stdout: "",
+                    stderr: result.stderr,
+                    exitCode: 2, // jq uses exit code 2 for file errors
+                };
+            }
+            inputs = result.files.map((f) => ({
+                source: f.filename || "stdin",
+                content: decodeBytesToUtf8(f.content),
+            }));
+        }
+        try {
+            const ast = parse(filter);
+            let values = [];
+            const evalOptions = {
+                limits: ctx.limits
+                    ? { maxIterations: ctx.limits.maxJqIterations }
+                    : undefined,
+                env: ctx.env,
+                coverage: ctx.coverage,
+                requireDefenseContext: ctx.requireDefenseContext,
+            };
+            if (nullInput) {
+                values = evaluate(null, ast, evalOptions);
+            }
+            else if (rawInput && slurp) {
+                // Raw slurp: the entire concatenated input becomes one JSON string.
+                const rawText = inputs.map(({ content }) => content).join("");
+                values = evaluate(rawText, ast, evalOptions);
+            }
+            else if (rawInput) {
+                // Raw input: real jq concatenates all inputs into a single stream and
+                // splits on newlines, so a line can span a file boundary when a file
+                // lacks a trailing newline. Scan incrementally, carrying only the
+                // unterminated trailing fragment across inputs, instead of building the
+                // full concatenated string and a complete array of lines. A trailing
+                // newline does not yield a final empty string, but interior blank
+                // lines are preserved.
+                let remainder = "";
+                for (const { content } of inputs) {
+                    const text = remainder + content;
+                    let start = 0;
+                    let nl = text.indexOf("\n", start);
+                    while (nl !== -1) {
+                        values.push(...evaluate(text.slice(start, nl), ast, evalOptions));
+                        start = nl + 1;
+                        nl = text.indexOf("\n", start);
+                    }
+                    remainder = text.slice(start);
+                }
+                if (remainder !== "") {
+                    values.push(...evaluate(remainder, ast, evalOptions));
+                }
+            }
+            else if (slurp) {
+                // Slurp mode: combine all inputs into single array
+                // Use JSON stream parser to handle concatenated JSON (not just NDJSON)
+                const items = [];
+                for (const { content } of inputs) {
+                    const trimmed = content.trim();
+                    if (trimmed) {
+                        items.push(...parseJsonStream(trimmed));
+                    }
+                }
+                values = evaluate(items, ast, evalOptions);
+            }
+            else {
+                // Process each input file separately
+                // Use JSON stream parser to handle concatenated JSON (e.g., cat file1.json file2.json | jq .)
+                for (const { content } of inputs) {
+                    const trimmed = content.trim();
+                    if (!trimmed)
+                        continue;
+                    const jsonValues = parseJsonStream(trimmed);
+                    for (const jsonValue of jsonValues) {
+                        values.push(...evaluate(jsonValue, ast, evalOptions));
+                    }
+                }
+            }
+            const formatted = values.map((v) => formatValue(v, compact, raw, sortKeys, useTab));
+            const separator = joinOutput ? "" : "\n";
+            const output = formatted.join(separator);
+            // Check output size against limit
+            const maxStringLength = ctx.limits?.maxStringLength;
+            if (maxStringLength !== undefined &&
+                maxStringLength > 0 &&
+                output.length > maxStringLength) {
+                throw new ExecutionLimitError(`jq: output size limit exceeded (${maxStringLength} bytes)`, "string_length");
+            }
+            const exitCode = exitStatus &&
+                (values.length === 0 ||
+                    values.every((v) => v === null || v === undefined || v === false))
+                ? 1
+                : 0;
+            // jq emits text; the pipeline handles encoding.
+            const stdoutText = output ? (joinOutput ? output : `${output}\n`) : "";
+            return {
+                stdout: stdoutText,
+                stderr: "",
+                exitCode,
+            };
+        }
+        catch (e) {
+            if (e instanceof SecurityViolationError) {
+                throw e;
+            }
+            if (e instanceof ExecutionLimitError) {
+                const message = sanitizeErrorMessage(e.message);
+                return {
+                    stdout: "",
+                    stderr: `jq: ${message}\n`,
+                    exitCode: ExecutionLimitError.EXIT_CODE,
+                };
+            }
+            const msg = sanitizeErrorMessage(e.message);
+            if (msg.includes("Unknown function")) {
+                return {
+                    stdout: "",
+                    stderr: `jq: error: ${msg}\n`,
+                    exitCode: 3,
+                };
+            }
+            return {
+                stdout: "",
+                stderr: `jq: parse error: ${msg}\n`,
+                exitCode: 5,
+            };
+        }
+    },
+};
+export const flagsForFuzzing = {
+    name: "jq",
+    flags: [
+        { flag: "-R", type: "boolean" },
+        { flag: "-r", type: "boolean" },
+        { flag: "-c", type: "boolean" },
+        { flag: "-e", type: "boolean" },
+        { flag: "-s", type: "boolean" },
+        { flag: "-n", type: "boolean" },
+        { flag: "-j", type: "boolean" },
+        { flag: "-S", type: "boolean" },
+        { flag: "--tab", type: "boolean" },
+    ],
+    stdinType: "json",
+    needsArgs: true,
+};

@@ -260,9 +260,9 @@ export interface ExecOptions {
    */
   cwd?: string;
   /**
-   * If true, skip normalizing the script (trimming leading whitespace from lines).
-   * Useful when running scripts where leading whitespace is significant (e.g., here-docs).
-   * Default: false
+   * @deprecated No-op. Scripts are no longer normalized (leading whitespace is
+   * never stripped), so the raw script is always parsed as-is. Retained for
+   * backward compatibility; setting it has no effect.
    */
   rawScript?: boolean;
   /**
@@ -655,14 +655,6 @@ export class Bash {
       extraArgs: options?.args,
     };
 
-    // Normalize indented multi-line scripts (unless rawScript is true)
-    // This allows writing indented bash scripts in template literals
-    // BUT we must preserve whitespace inside heredoc content
-    let normalized = commandLine;
-    if (!options?.rawScript) {
-      normalized = normalizeScript(commandLine);
-    }
-
     // Activate defense-in-depth box if configured
     // This wraps execution in AsyncLocalStorage context for context-aware blocking
     const defenseBox = this.defenseInDepthConfig
@@ -673,7 +665,7 @@ export class Bash {
     try {
       // Run execution inside defense-in-depth context if enabled
       const executeScript = async (): Promise<BashExecResult> => {
-        let ast = parse(normalized, {
+        let ast = parse(commandLine, {
           maxHeredocSize: this.limits.maxHeredocSize,
         });
 
@@ -839,8 +831,7 @@ export class Bash {
   }
 
   transform(commandLine: string): BashTransformResult {
-    const normalized = normalizeScript(commandLine);
-    let ast = parse(normalized, {
+    let ast = parse(commandLine, {
       maxHeredocSize: this.limits.maxHeredocSize,
     });
     let metadata: Record<string, unknown> = Object.create(null);
@@ -859,66 +850,6 @@ export class Bash {
       metadata,
     };
   }
-}
-
-/**
- * Normalize a script by stripping leading whitespace from lines,
- * while preserving whitespace inside heredoc content.
- *
- * This allows writing indented bash scripts in template literals:
- * ```
- * await bash.exec(`
- *   if [ -f foo ]; then
- *     echo "yes"
- *   fi
- * `);
- * ```
- *
- * Heredocs are detected by looking for << or <<- operators and their delimiters.
- */
-function normalizeScript(script: string): string {
-  const lines = script.split("\n");
-  const result: string[] = [];
-
-  // Stack of pending heredoc delimiters (for nested heredocs)
-  const pendingDelimiters: { delimiter: string; stripTabs: boolean }[] = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-
-    // If we're inside a heredoc, check if this line ends it
-    if (pendingDelimiters.length > 0) {
-      const current = pendingDelimiters[pendingDelimiters.length - 1];
-      // For <<-, strip leading tabs when checking delimiter
-      // For <<, require exact match (no leading whitespace allowed)
-      const lineToCheck = current.stripTabs ? line.replace(/^\t+/, "") : line;
-      if (lineToCheck === current.delimiter) {
-        // End of heredoc - this line can be normalized
-        result.push(line.trimStart());
-        pendingDelimiters.pop();
-        continue;
-      }
-      // Inside heredoc - preserve the line exactly as-is
-      result.push(line);
-      continue;
-    }
-
-    // Not inside a heredoc - normalize the line and check for heredoc starts
-    const normalizedLine = line.trimStart();
-    result.push(normalizedLine);
-
-    // Check for heredoc operators in this line
-    // Match: <<DELIM, <<-DELIM, << 'DELIM', <<- "DELIM", etc.
-    // Multiple heredocs on one line are possible: cmd <<EOF1 <<EOF2
-    const heredocPattern = /<<(-?)\s*(['"]?)([\w-]+)\2/g;
-    for (const match of normalizedLine.matchAll(heredocPattern)) {
-      const stripTabs = match[1] === "-";
-      const delimiter = match[3];
-      pendingDelimiters.push({ delimiter, stripTabs });
-    }
-  }
-
-  return result.join("\n");
 }
 
 /**

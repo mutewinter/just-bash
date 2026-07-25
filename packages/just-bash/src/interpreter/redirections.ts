@@ -17,7 +17,7 @@ import {
   readBytesFrom,
   utf8ByteLength,
 } from "../encoding.js";
-import type { ExecResult } from "../types.js";
+import type { ExecResult, OutputChunk } from "../types.js";
 import {
   ControlFlowError,
   ErrexitError,
@@ -1095,6 +1095,38 @@ export async function withPreparedRedirections(
   }
 }
 
+/**
+ * The two streams merged into one, in the order the interpreter recorded them,
+ * so a duplication like `2>&1` splices stderr where it was written instead of
+ * appending it after all of stdout.
+ *
+ * Falls back to stdout-then-stderr whenever the recorded chunks no longer
+ * reconstruct both pending strings exactly -- a single command records no
+ * order, and the redirection list above may have rewritten a stream (an
+ * ambiguous-redirect message, a target that failed to open). Reconstructing
+ * rather than trusting the chunks keeps content authoritative: the merge can
+ * reorder, never invent or drop.
+ */
+function mergeInRecordedOrder(
+  chunks: OutputChunk[] | undefined,
+  pendingStdout: string,
+  pendingStderr: string,
+): string {
+  if (!chunks?.length) {
+    return pendingStdout + pendingStderr;
+  }
+  let recordedStdout = "";
+  let recordedStderr = "";
+  for (const chunk of chunks) {
+    if (chunk.stream === "stdout") recordedStdout += chunk.text;
+    else recordedStderr += chunk.text;
+  }
+  if (recordedStdout !== pendingStdout || recordedStderr !== pendingStderr) {
+    return pendingStdout + pendingStderr;
+  }
+  return chunks.map((chunk) => chunk.text).join("");
+}
+
 export async function applyRedirections(
   ctx: InterpreterContext,
   result: ExecResult,
@@ -1338,27 +1370,40 @@ export async function applyRedirections(
         await ctx.fs.writeFile(sink.path, content, encoding);
       }
     };
-    if (
-      fd1Sink === fd2Sink &&
-      (fd1Sink.kind === "file" || fd1Sink.kind === "descriptor")
-    ) {
-      // stdout-then-stderr order, not the command's temporal write order:
-      // ExecResult accumulates the two streams separately, so interleaving
-      // is not recorded anywhere in the interpreter. This matches the
-      // convention of the live-stream merge (`stdout += stderr`) used for a
-      // bare `2>&1`.
-      const combined = pendingStdout + pendingStderr;
+    if (fd1Sink === fd2Sink) {
+      // One descriptor carries both streams, so they arrive at it in the order
+      // they were written. Identity, not equality: two redirects that name the
+      // same path are separate descriptors and keep the clobbering behaviour
+      // handled by the loop below.
+      const combined = mergeInRecordedOrder(
+        result.outputChunks,
+        pendingStdout,
+        pendingStderr,
+      );
       if (combined !== "") {
-        if (fd1Sink.kind === "file") {
-          await deliverToFile(fd1Sink, combined, getStdoutEncoding(combined));
-        } else {
-          await writeFdEntry(
-            ctx,
-            fd1Sink.source.entry,
-            fd1Sink.source.descriptors,
-            combined,
-            getStdoutEncoding(combined),
-          );
+        switch (fd1Sink.kind) {
+          case "live-stdout":
+            stdout += combined;
+            break;
+          case "live-stderr":
+            stderr += combined;
+            break;
+          case "file":
+            await deliverToFile(fd1Sink, combined, getStdoutEncoding(combined));
+            break;
+          case "descriptor":
+            await writeFdEntry(
+              ctx,
+              fd1Sink.source.entry,
+              fd1Sink.source.descriptors,
+              combined,
+              getStdoutEncoding(combined),
+            );
+            break;
+          case "invalid-output":
+            break;
+          case "discard":
+            break;
         }
       }
     } else {

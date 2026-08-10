@@ -1342,11 +1342,11 @@ export async function applyRedirections(
   // before any redirection — a dup snapshot of a live fd keeps pointing
   // there even if a later redirection sends the source fd elsewhere.
   //
-  // A duplication (`2>&1`) shares the source fd's sink OBJECT — one open
-  // descriptor, so both streams go through it in order. Two independent
-  // redirects that happen to name the same path (`> f 2> f`) are separate
-  // descriptors, each writing from its own start position, so the later
-  // non-empty write clobbers the earlier one — matching bash's
+  // A duplication (`2>&1`) puts both fds on one open descriptor (see
+  // `fdsShareOneDescriptor`), so both streams go through it in order. Two
+  // independent redirects that happen to name the same path (`> f 2> f`) are
+  // separate descriptors, each writing from its own start position, so the
+  // later non-empty write clobbers the earlier one — matching bash's
   // independent-open behavior.
   if (stdout !== "" || stderr !== "") {
     let pendingStdout = stdout;
@@ -1359,6 +1359,39 @@ export async function applyRedirections(
       exitCode = 1;
     }
     if (fd2Sink.kind === "invalid-output") pendingStderr = "";
+    // Whether both fds ended up on one open descriptor, which is what makes a
+    // duplication carry the two streams in the order they were written.
+    //
+    // Sharing the sink object is one way to be that descriptor (`&> f` points
+    // both fds at one open). The others come from a sink rebuilt rather than
+    // shared: the live streams are the caller's own stdout and stderr, of which
+    // there is only ever one each, and `> f 2>&1` leaves fd 1 on the file it
+    // opened while fd 2 holds a dup snapshot of that open — the same fd-table
+    // entry, whose alias list names the fd that opened it. Two independent
+    // redirects to one path (`> f 2> f`) each open their own entry, so they
+    // match none of these and keep clobbering.
+    const dupOfOpenFile = (
+      sink: RedirectSink,
+      opener: 1 | 2,
+      opened: Extract<RedirectSink, { kind: "file" }>,
+    ): boolean =>
+      sink.kind === "descriptor" &&
+      sink.source.entry.kind === "output" &&
+      sink.source.entry.path === opened.path &&
+      sink.source.entry.append === opened.append &&
+      sink.source.descriptors.includes(opener);
+    const fdsShareOneDescriptor = (): boolean => {
+      if (fd1Sink === fd2Sink) return true;
+      if (fd1Sink.kind === "live-stdout" && fd2Sink.kind === "live-stdout") {
+        return true;
+      }
+      if (fd1Sink.kind === "live-stderr" && fd2Sink.kind === "live-stderr") {
+        return true;
+      }
+      if (fd1Sink.kind === "file") return dupOfOpenFile(fd2Sink, 1, fd1Sink);
+      if (fd2Sink.kind === "file") return dupOfOpenFile(fd1Sink, 2, fd2Sink);
+      return false;
+    };
     const deliverToFile = async (
       sink: { path: string; append: boolean },
       content: string,
@@ -1370,11 +1403,9 @@ export async function applyRedirections(
         await ctx.fs.writeFile(sink.path, content, encoding);
       }
     };
-    if (fd1Sink === fd2Sink) {
+    if (fdsShareOneDescriptor()) {
       // One descriptor carries both streams, so they arrive at it in the order
-      // they were written. Identity, not equality: two redirects that name the
-      // same path are separate descriptors and keep the clobbering behaviour
-      // handled by the loop below.
+      // they were written.
       const combined = mergeInRecordedOrder(
         result.outputChunks,
         pendingStdout,

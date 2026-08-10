@@ -29,24 +29,21 @@ describe("touch -t", () => {
     ["2601020304.05", 2026, 0, 2, 3, 4, 5],
     ["6901020304", 1969, 0, 2, 3, 4, 0],
     ["6801020304", 2068, 0, 2, 3, 4, 0],
-  ])(
-    "stamps %s onto the file",
-    async (stamp, year, month, day, hour, minute, second) => {
-      const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
-      const result = await bash.exec(`touch -t ${stamp} /w/f.txt`);
-      expect(result.exitCode).toBe(0);
+  ])("stamps %s onto the file", async (stamp, year, month, day, hour, minute, second) => {
+    const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
+    const result = await bash.exec(`touch -t ${stamp} /w/f.txt`);
+    expect(result.exitCode).toBe(0);
 
-      const mtime = await mtimeOf(bash, "/w/f.txt");
-      expect([
-        mtime.getFullYear(),
-        mtime.getMonth(),
-        mtime.getDate(),
-        mtime.getHours(),
-        mtime.getMinutes(),
-        mtime.getSeconds(),
-      ]).toEqual([year, month, day, hour, minute, second]);
-    },
-  );
+    const mtime = await mtimeOf(bash, "/w/f.txt");
+    expect([
+      mtime.getFullYear(),
+      mtime.getMonth(),
+      mtime.getDate(),
+      mtime.getHours(),
+      mtime.getMinutes(),
+      mtime.getSeconds(),
+    ]).toEqual([year, month, day, hour, minute, second]);
+  });
 
   it("defaults a yearless stamp to the current year", async () => {
     const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
@@ -66,17 +63,17 @@ describe("touch -t", () => {
     expect((await mtimeOf(bash, "/w/new.txt")).getFullYear()).toBe(2020);
   });
 
-  it.each(["99", "202613010000", "202002300000", "2020010100000"])(
-    "rejects %s as a date format",
-    async (stamp) => {
-      const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
-      const result = await bash.exec(`touch -t ${stamp} /w/f.txt`);
-      expect(result.stderr).toBe(
-        `touch: invalid date format '${stamp}'\n`,
-      );
-      expect(result.exitCode).toBe(1);
-    },
-  );
+  it.each([
+    "99",
+    "202613010000",
+    "202002300000",
+    "2020010100000",
+  ])("rejects %s as a date format", async (stamp) => {
+    const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
+    const result = await bash.exec(`touch -t ${stamp} /w/f.txt`);
+    expect(result.stderr).toBe(`touch: invalid date format '${stamp}'\n`);
+    expect(result.exitCode).toBe(1);
+  });
 
   it("reports a missing argument", async () => {
     const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });

@@ -33,6 +33,13 @@ describe("fd duplication output ordering", () => {
     expect(f.stdout).toBe("O1\nE1\nO2\n");
   });
 
+  it("interleaves into a file the other fd opened", async () => {
+    const env = new Bash();
+    await env.exec("{ echo O1; echo E1 1>&2; echo O2; } 2> /f 1>&2");
+    const f = await env.exec("cat /f");
+    expect(f.stdout).toBe("O1\nE1\nO2\n");
+  });
+
   it("interleaves onto stderr for 1>&2", async () => {
     const result = await new Bash().exec(
       "( echo O1; echo E1 1>&2; echo O2 ) 1>&2",

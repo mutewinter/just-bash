@@ -254,6 +254,9 @@ export const touchCommand: RuntimeCommand = {
         const mtime = targetTime ?? new Date();
         await ctx.fs.utimes(fullPath, mtime, mtime);
       } catch (error) {
+        // A limit, an abort or a security violation is not this file failing
+        // to be touched; it has to keep going up.
+        rethrowFatalExecutionError(error);
         stderr += `touch: cannot touch '${file}': ${getErrorMessage(error)}\n`;
         exitCode = 1;
       }

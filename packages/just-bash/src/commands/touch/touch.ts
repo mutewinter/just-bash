@@ -1,3 +1,4 @@
+import { rethrowFatalExecutionError } from "../../fatal-execution-error.js";
 import { getErrorMessage } from "../../interpreter/helpers/errors.js";
 import type {
   ExecResult,
@@ -5,6 +6,7 @@ import type {
   RuntimeCommandContext,
 } from "../../types.js";
 import { unknownOption } from "../help.js";
+import { isValidTimezone, parseBareISOInTimezone } from "../timezone.js";
 
 /**
  * Parse a date string in various formats supported by touch -d
@@ -12,51 +14,26 @@ import { unknownOption } from "../help.js";
  * - YYYY/MM/DD or YYYY-MM-DD
  * - YYYY/MM/DD HH:MM:SS or YYYY-MM-DD HH:MM:SS
  * - ISO 8601 format
+ *
+ * A spelling that names no zone is read in `tz`, or in UTC when the shell has
+ * no `$TZ`. That is the same contract `date -d` follows, so a stamp written
+ * here reads back the same way there, and the host's own zone stays out of it.
  */
-function parseDateString(dateStr: string): Date | null {
+function parseDateString(dateStr: string, tz?: string): Date | null {
   // Try common date formats
   // Replace / with - for consistency
   const normalized = dateStr.replace(/\//g, "-");
 
-  // A bare YYYY-MM-DD is midnight local time, which is what touch means by
-  // it. The Date constructor reads that same spelling as UTC, so it has to
-  // be built from components before the general parse gets a look at it.
-  const dateMatch = normalized.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (dateMatch) {
-    const [, year, month, day] = dateMatch;
-    const date = new Date(
-      Number.parseInt(year, 10),
-      Number.parseInt(month, 10) - 1,
-      Number.parseInt(day, 10),
-    );
-    if (!Number.isNaN(date.getTime())) {
-      return date;
-    }
+  if (tz && !/Z$/i.test(normalized) && !/[+-]\d{2}:?\d{2}$/.test(normalized)) {
+    const zoned = parseBareISOInTimezone(normalized.replace(/\s+/, "T"), tz);
+    if (zoned) return zoned;
   }
 
-  // Try parsing as ISO 8601 or simple date
+  // Try parsing as ISO 8601 or simple date. A bare YYYY-MM-DD is UTC here,
+  // which is the no-$TZ default rather than an accident.
   const date = new Date(normalized);
   if (!Number.isNaN(date.getTime())) {
     return date;
-  }
-
-  // Try YYYY-MM-DD HH:MM:SS format
-  const dateTimeMatch = normalized.match(
-    /^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/,
-  );
-  if (dateTimeMatch) {
-    const [, year, month, day, hour, minute, second] = dateTimeMatch;
-    const dateTime = new Date(
-      Number.parseInt(year, 10),
-      Number.parseInt(month, 10) - 1,
-      Number.parseInt(day, 10),
-      Number.parseInt(hour, 10),
-      Number.parseInt(minute, 10),
-      Number.parseInt(second, 10),
-    );
-    if (!Number.isNaN(dateTime.getTime())) {
-      return dateTime;
-    }
   }
 
   return null;
@@ -68,8 +45,11 @@ function parseDateString(dateStr: string): Date | null {
  * Two-digit years pivot at 69, the boundary POSIX fixes for this format: 69
  * through 99 are 1969-1999, 00 through 68 are 2000-2068. Without a year at
  * all the stamp lands in the current one.
+ *
+ * The stamp names no zone, so it is read in `tz`, or in UTC when the shell has
+ * no `$TZ`, matching `-d`.
  */
-function parseTimestampString(stamp: string): Date | null {
+function parseTimestampString(stamp: string, tz?: string): Date | null {
   const match = /^(\d{8}|\d{10}|\d{12})(?:\.(\d{2}))?$/.exec(stamp);
   if (!match) return null;
 
@@ -97,10 +77,21 @@ function parseTimestampString(stamp: string): Date | null {
   if (day < 1 || day > 31) return null;
   if (hour > 23 || minute > 59 || second > 60) return null;
 
-  const date = new Date(year, month - 1, day, hour, minute, second);
-  if (Number.isNaN(date.getTime())) return null;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const wall = `${String(year).padStart(4, "0")}-${pad(month)}-${pad(day)}T${pad(hour)}:${pad(minute)}:${pad(second)}`;
+
+  const date = tz ? parseBareISOInTimezone(wall, tz) : new Date(`${wall}Z`);
+  if (date === null || Number.isNaN(date.getTime())) return null;
+
   // Reject a day the month does not have, which Date would roll forward.
-  if (date.getMonth() !== month - 1 || date.getDate() !== day) return null;
+  const check = new Date(`${wall}Z`);
+  if (
+    check.getUTCMonth() !== month - 1 ||
+    check.getUTCDate() !== day ||
+    check.getUTCFullYear() !== year
+  ) {
+    return null;
+  }
   return date;
 }
 
@@ -202,7 +193,13 @@ export const touchCommand: RuntimeCommand = {
       };
     }
 
-    // Resolve whichever of -d, -t and -r was given last
+    // Resolve whichever of -d, -t and -r was given last.
+    // An unset or unresolvable $TZ leaves tz undefined, which parses in UTC:
+    // the same contract date uses, and it keeps the host's zone out of a
+    // timestamp the caller did not ask to be host-relative.
+    let tz = ctx.env.get("TZ");
+    if (tz && !isValidTimezone(tz)) tz = undefined;
+
     let targetTime: Date | null = null;
     if (timeSource !== null) {
       if (timeSource.kind === "reference") {
@@ -212,7 +209,10 @@ export const touchCommand: RuntimeCommand = {
           // handed back: that object stops answering once the command ends,
           // and it is about to be written into the filesystem.
           targetTime = new Date((await ctx.fs.stat(reference)).mtime.getTime());
-        } catch {
+        } catch (error) {
+          // Abort, limit and security-violation errors have to keep
+          // propagating; only a genuinely missing reference is reported here.
+          rethrowFatalExecutionError(error);
           return {
             stdout: "",
             stderr: `touch: failed to get attributes of '${timeSource.value}': No such file or directory\n`,
@@ -222,8 +222,8 @@ export const touchCommand: RuntimeCommand = {
       } else {
         targetTime =
           timeSource.kind === "stamp"
-            ? parseTimestampString(timeSource.value)
-            : parseDateString(timeSource.value);
+            ? parseTimestampString(timeSource.value, tz)
+            : parseDateString(timeSource.value, tz);
         if (targetTime === null) {
           return {
             stdout: "",

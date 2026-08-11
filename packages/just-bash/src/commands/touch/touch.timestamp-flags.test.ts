@@ -14,9 +14,13 @@ import { Bash } from "../../Bash.js";
  * fixes for this format. With no year at all the stamp lands in the current
  * one.
  *
- * Measured against GNU coreutils touch 9.2. BSD touch accepts the same
- * stamp; it differs only in rejecting `-d` spellings GNU takes, which this
- * change does not touch.
+ * Neither `-t` nor `-d` names a zone, so both are read in `$TZ`, or in UTC
+ * when the shell has none. That is `date`'s contract, and it keeps the host's
+ * own zone out of a timestamp nobody asked to be host-relative. Assertions
+ * here are therefore on UTC components: a local-component assertion would
+ * pass or fail depending on where the suite runs.
+ *
+ * Measured against GNU coreutils touch 9.2 with TZ set explicitly.
  */
 
 async function mtimeOf(bash: Bash, path: string): Promise<Date> {
@@ -25,24 +29,27 @@ async function mtimeOf(bash: Bash, path: string): Promise<Date> {
 
 describe("touch -t", () => {
   it.each([
-    ["202601020304", 2026, 0, 2, 3, 4, 0],
-    ["2601020304.05", 2026, 0, 2, 3, 4, 5],
-    ["6901020304", 1969, 0, 2, 3, 4, 0],
-    ["6801020304", 2068, 0, 2, 3, 4, 0],
-  ])("stamps %s onto the file", async (stamp, year, month, day, hour, minute, second) => {
+    ["202601020304", "2026-01-02T03:04:00.000Z"],
+    ["2601020304.05", "2026-01-02T03:04:05.000Z"],
+    ["6901020304", "1969-01-02T03:04:00.000Z"],
+    ["6801020304", "2068-01-02T03:04:00.000Z"],
+  ])("stamps %s as UTC when the shell has no TZ", async (stamp, iso) => {
     const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
     const result = await bash.exec(`touch -t ${stamp} /w/f.txt`);
     expect(result.exitCode).toBe(0);
+    expect((await mtimeOf(bash, "/w/f.txt")).toISOString()).toBe(iso);
+  });
 
-    const mtime = await mtimeOf(bash, "/w/f.txt");
-    expect([
-      mtime.getFullYear(),
-      mtime.getMonth(),
-      mtime.getDate(),
-      mtime.getHours(),
-      mtime.getMinutes(),
-      mtime.getSeconds(),
-    ]).toEqual([year, month, day, hour, minute, second]);
+  it("reads the stamp in $TZ when the shell sets one", async () => {
+    const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
+    const result = await bash.exec(
+      "TZ=America/Chicago touch -t 202601020304 /w/f.txt",
+    );
+    expect(result.exitCode).toBe(0);
+    // 03:04 CST is 09:04 UTC.
+    expect((await mtimeOf(bash, "/w/f.txt")).toISOString()).toBe(
+      "2026-01-02T09:04:00.000Z",
+    );
   });
 
   it("defaults a yearless stamp to the current year", async () => {
@@ -50,9 +57,9 @@ describe("touch -t", () => {
     await bash.exec("touch -t 01020304 /w/f.txt");
 
     const mtime = await mtimeOf(bash, "/w/f.txt");
-    expect(mtime.getFullYear()).toBe(new Date().getFullYear());
-    expect(mtime.getMonth()).toBe(0);
-    expect(mtime.getDate()).toBe(2);
+    expect(mtime.getUTCFullYear()).toBe(new Date().getFullYear());
+    expect(mtime.getUTCMonth()).toBe(0);
+    expect(mtime.getUTCDate()).toBe(2);
   });
 
   it("creates the file it stamps", async () => {
@@ -60,7 +67,9 @@ describe("touch -t", () => {
     const result = await bash.exec("touch -t 202001010000 /w/new.txt");
     expect(result.exitCode).toBe(0);
     expect(await bash.fs.exists("/w/new.txt")).toBe(true);
-    expect((await mtimeOf(bash, "/w/new.txt")).getFullYear()).toBe(2020);
+    expect((await mtimeOf(bash, "/w/new.txt")).toISOString()).toBe(
+      "2020-01-01T00:00:00.000Z",
+    );
   });
 
   it.each([
@@ -86,7 +95,9 @@ describe("touch -t", () => {
     const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
     const result = await bash.exec("touch -ct 202001010000 /w/f.txt");
     expect(result.exitCode).toBe(0);
-    expect((await mtimeOf(bash, "/w/f.txt")).getFullYear()).toBe(2020);
+    expect((await mtimeOf(bash, "/w/f.txt")).toISOString()).toBe(
+      "2020-01-01T00:00:00.000Z",
+    );
   });
 });
 
@@ -101,14 +112,9 @@ describe("touch -r", () => {
     );
 
     expect(result.exitCode).toBe(0);
-    const mtime = await mtimeOf(bash, "/w/f.txt");
-    expect([
-      mtime.getFullYear(),
-      mtime.getMonth(),
-      mtime.getDate(),
-      mtime.getHours(),
-      mtime.getMinutes(),
-    ]).toEqual([2020, 0, 2, 3, 4]);
+    expect((await mtimeOf(bash, "/w/f.txt")).toISOString()).toBe(
+      "2020-01-02T03:04:00.000Z",
+    );
   });
 
   it("reports a reference that does not exist", async () => {
@@ -122,26 +128,60 @@ describe("touch -r", () => {
 });
 
 describe("touch -d", () => {
-  it("reads a bare date as local midnight", async () => {
+  it("reads a bare date as UTC when the shell has no TZ", async () => {
     const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
     const result = await bash.exec("touch -d 2021-01-01 /w/f.txt");
 
     expect(result.exitCode).toBe(0);
-    const mtime = await mtimeOf(bash, "/w/f.txt");
-    expect([mtime.getFullYear(), mtime.getMonth(), mtime.getDate()]).toEqual([
-      2021, 0, 1,
-    ]);
+    expect((await mtimeOf(bash, "/w/f.txt")).toISOString()).toBe(
+      "2021-01-01T00:00:00.000Z",
+    );
+  });
+
+  it("reads a bare date in $TZ when the shell sets one", async () => {
+    const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
+    const result = await bash.exec(
+      "TZ=America/Chicago touch -d 2021-01-01 /w/f.txt",
+    );
+
+    expect(result.exitCode).toBe(0);
+    // Midnight CST is 06:00 UTC.
+    expect((await mtimeOf(bash, "/w/f.txt")).toISOString()).toBe(
+      "2021-01-01T06:00:00.000Z",
+    );
+  });
+
+  it("keeps an explicit offset over $TZ", async () => {
+    const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
+    const result = await bash.exec(
+      "TZ=America/Chicago touch -d 2021-01-01T00:00:00Z /w/f.txt",
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect((await mtimeOf(bash, "/w/f.txt")).toISOString()).toBe(
+      "2021-01-01T00:00:00.000Z",
+    );
+  });
+
+  it("ignores a $TZ Intl cannot resolve and falls back to UTC", async () => {
+    const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
+    const result = await bash.exec("TZ=Not/AZone touch -d 2021-01-01 /w/f.txt");
+
+    expect(result.exitCode).toBe(0);
+    expect((await mtimeOf(bash, "/w/f.txt")).toISOString()).toBe(
+      "2021-01-01T00:00:00.000Z",
+    );
   });
 });
 
 describe("touch timestamp flag precedence", () => {
   it.each([
-    ["-d 2021-01-01 -t 202201010000", 2022],
-    ["-t 202201010000 -d 2021-01-01", 2021],
-  ])("lets the last of %s win", async (flags, year) => {
+    ["-d 2021-01-01 -t 202201010000", "2022-01-01T00:00:00.000Z"],
+    ["-t 202201010000 -d 2021-01-01", "2021-01-01T00:00:00.000Z"],
+  ])("lets the last of %s win", async (flags, iso) => {
     const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
     const result = await bash.exec(`touch ${flags} /w/f.txt`);
     expect(result.exitCode).toBe(0);
-    expect((await mtimeOf(bash, "/w/f.txt")).getFullYear()).toBe(year);
+    expect((await mtimeOf(bash, "/w/f.txt")).toISOString()).toBe(iso);
   });
 });

@@ -66,10 +66,13 @@ function tzShownAsUtc(d: Date, tz: string): Date | null {
  */
 export function parseBareISOInTimezone(s: string, tz: string): Date | null {
   const m = s.match(
-    /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?$/,
+    /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?)?$/,
   );
   if (!m) return null;
-  const [, yr, mo, dy, hr = "00", mn = "00", sc = "00"] = m;
+  const [, yr, mo, dy, hr = "00", mn = "00", sc = "00", frac] = m;
+  // The zone shows whole seconds, so a fractional part would read as permanent
+  // drift and never converge. It is added back to the instant the loop settles.
+  const milliseconds = frac ? Number.parseInt(frac.padEnd(3, "0"), 10) : 0;
   const requested = new Date(`${yr}-${mo}-${dy}T${hr}:${mn}:${sc}Z`);
   if (Number.isNaN(requested.getTime())) return null;
   try {
@@ -78,11 +81,33 @@ export function parseBareISOInTimezone(s: string, tz: string): Date | null {
       const shown = tzShownAsUtc(candidate, tz);
       if (shown === null) return null;
       const drift = shown.getTime() - requested.getTime();
-      if (drift === 0) return candidate;
+      if (drift === 0) break;
       candidate = new Date(candidate.getTime() - drift);
     }
-    return candidate;
+    return new Date(candidate.getTime() + milliseconds);
   } catch {
     return null;
+  }
+}
+
+/**
+ * The calendar year `tz` is currently in, or the UTC year when the shell has
+ * no `$TZ`. `touch -t` fills in a missing year from this, so a stamp written
+ * either side of a New Year boundary lands in the year the shell's zone is
+ * in rather than the host's.
+ */
+export function currentYearInTimezone(
+  tz?: string,
+  now: Date = new Date(),
+): number {
+  if (!tz) return now.getUTCFullYear();
+  try {
+    const year = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      year: "numeric",
+    }).format(now);
+    return Number.parseInt(year, 10) || now.getUTCFullYear();
+  } catch {
+    return now.getUTCFullYear();
   }
 }

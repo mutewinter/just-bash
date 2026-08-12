@@ -6,7 +6,11 @@ import type {
   RuntimeCommandContext,
 } from "../../types.js";
 import { unknownOption } from "../help.js";
-import { isValidTimezone, parseBareISOInTimezone } from "../timezone.js";
+import {
+  currentYearInTimezone,
+  isValidTimezone,
+  parseBareISOInTimezone,
+} from "../timezone.js";
 
 /**
  * Parse a date string in various formats supported by touch -d
@@ -24,13 +28,20 @@ function parseDateString(dateStr: string, tz?: string): Date | null {
   // Replace / with - for consistency
   const normalized = dateStr.replace(/\//g, "-");
 
-  if (tz && !/Z$/i.test(normalized) && !/[+-]\d{2}:?\d{2}$/.test(normalized)) {
-    const zoned = parseBareISOInTimezone(normalized.replace(/\s+/, "T"), tz);
+  // A spelling that names no zone is resolved in $TZ, or in UTC when there is
+  // none. Handing it to `new Date` instead would read a bare date as UTC but
+  // anything carrying a time as host-local, so the same stamp would mean a
+  // different instant on a different machine.
+  if (!/Z$/i.test(normalized) && !/[+-]\d{2}:?\d{2}$/.test(normalized)) {
+    const zoned = parseBareISOInTimezone(
+      normalized.replace(/\s+/, "T"),
+      tz ?? "UTC",
+    );
     if (zoned) return zoned;
   }
 
-  // Try parsing as ISO 8601 or simple date. A bare YYYY-MM-DD is UTC here,
-  // which is the no-$TZ default rather than an accident.
+  // Anything else carries its own offset, or is a spelling outside the ISO
+  // grammar above.
   const date = new Date(normalized);
   if (!Number.isNaN(date.getTime())) {
     return date;
@@ -44,7 +55,9 @@ function parseDateString(dateStr: string, tz?: string): Date | null {
  *
  * Two-digit years pivot at 69, the boundary POSIX fixes for this format: 69
  * through 99 are 1969-1999, 00 through 68 are 2000-2068. Without a year at
- * all the stamp lands in the current one.
+ * all the stamp lands in the year `tz` is currently in, or the UTC year when
+ * the shell has no `$TZ`: the host's calendar would otherwise decide it, and
+ * the two disagree either side of a New Year boundary.
  *
  * The stamp names no zone, so it is read in `tz`, or in UTC when the shell has
  * no `$TZ`, matching `-d`.
@@ -64,7 +77,7 @@ function parseTimestampString(stamp: string, tz?: string): Date | null {
     const twoDigit = Number.parseInt(yearDigits, 10);
     year = twoDigit >= 69 ? 1900 + twoDigit : 2000 + twoDigit;
   } else {
-    year = new Date().getFullYear();
+    year = currentYearInTimezone(tz);
   }
 
   const month = Number.parseInt(rest.slice(0, 2), 10);
@@ -93,6 +106,19 @@ function parseTimestampString(stamp: string, tz?: string): Date | null {
     return null;
   }
   return date;
+}
+
+/**
+ * What to print after "failed to get attributes of 'ref'". Absence gets the
+ * wording `touch` uses for it; anything else keeps the reason it came with,
+ * since reporting a reference that exists as missing sends the caller looking
+ * for a file that is right there.
+ */
+function referenceFailureReason(error: unknown): string {
+  const message = getErrorMessage(error);
+  return message.includes("ENOENT") || message.includes("no such file")
+    ? "No such file or directory"
+    : message;
 }
 
 /** Where the timestamp to write came from; the last flag given wins. */
@@ -215,7 +241,7 @@ export const touchCommand: RuntimeCommand = {
           rethrowFatalExecutionError(error);
           return {
             stdout: "",
-            stderr: `touch: failed to get attributes of '${timeSource.value}': No such file or directory\n`,
+            stderr: `touch: failed to get attributes of '${timeSource.value}': ${referenceFailureReason(error)}\n`,
             exitCode: 1,
           };
         }

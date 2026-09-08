@@ -451,8 +451,23 @@ export const findCommand: RuntimeCommand = {
 
         if (isDirectory && shouldReadDir) {
           const readdirStart = Date.now();
-          if (hasReaddirWithFileTypes && ctx.fs.readdirWithFileTypes) {
-            entriesWithTypes = await ctx.fs.readdirWithFileTypes(currentPath);
+          try {
+            if (hasReaddirWithFileTypes && ctx.fs.readdirWithFileTypes) {
+              entriesWithTypes = await ctx.fs.readdirWithFileTypes(currentPath);
+            } else {
+              entries = await ctx.fs.readdir(currentPath);
+            }
+          } catch (error) {
+            // GNU find names the directory it could not read and carries on,
+            // exiting 1 at the end. Throwing here instead turned one unreadable
+            // directory into an empty result for the whole search, and on a
+            // home directory there is always one.
+            const reason = describeUnreadableDirectory(error);
+            if (reason === null) throw error;
+            appendStderr(`find: ${relativePath}: ${reason}\n`);
+            exitCode = 1;
+          }
+          if (entriesWithTypes !== null) {
             traversalBudget.checkpoint();
             traversalBudget.discover(entriesWithTypes.length);
             entries = [];
@@ -479,8 +494,7 @@ export const findCommand: RuntimeCommand = {
                 });
               }
             }
-          } else {
-            entries = await ctx.fs.readdir(currentPath);
+          } else if (entries !== null) {
             traversalBudget.checkpoint();
             traversalBudget.discover(entries.length);
             traceCounters.readdirCalls++;
@@ -1121,6 +1135,39 @@ function formatCtimeDate(date: Date): string {
   const year = date.getFullYear();
 
   return `${day} ${month} ${dayNum} ${hours}:${mins}:${secs} ${year}`;
+}
+
+/**
+ * The phrase GNU find prints for a directory it could not read, from the
+ * errno alone. Only the code is repeated: the message behind it can carry a
+ * host path, which is not the sandbox's to show. Null for anything that is
+ * not a filesystem error, which the caller lets propagate.
+ */
+function describeUnreadableDirectory(error: unknown): string | null {
+  const code =
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string"
+      ? error.code
+      : error instanceof Error
+        ? /^(E[A-Z]+)\b/.exec(error.message)?.[1]
+        : undefined;
+  switch (code) {
+    case "EACCES":
+    case "EPERM":
+      return "Permission denied";
+    case "ENOENT":
+      return "No such file or directory";
+    case "ENOTDIR":
+      return "Not a directory";
+    case "ELOOP":
+      return "Too many levels of symbolic links";
+    case undefined:
+      return null;
+    default:
+      return code;
+  }
 }
 
 /**

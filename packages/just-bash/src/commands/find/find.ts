@@ -1186,15 +1186,15 @@ function formatCtimeDate(date: Date): string {
  * carries a code of its own and must end the search, not become a line of
  * stderr, so the phrase comes from this table and never from the error.
  */
-const UNREADABLE_DIRECTORY_REASONS: Record<string, string> = {
-  EACCES: "Permission denied",
-  EIO: "Input/output error",
-  ELOOP: "Too many levels of symbolic links",
-  ENAMETOOLONG: "File name too long",
-  ENOENT: "No such file or directory",
-  ENOTDIR: "Not a directory",
-  EPERM: "Permission denied",
-};
+const UNREADABLE_DIRECTORY_REASONS = new Map<string, string>([
+  ["EACCES", "Permission denied"],
+  ["EIO", "Input/output error"],
+  ["ELOOP", "Too many levels of symbolic links"],
+  ["ENAMETOOLONG", "File name too long"],
+  ["ENOENT", "No such file or directory"],
+  ["ENOTDIR", "Not a directory"],
+  ["EPERM", "Permission denied"],
+]);
 
 /**
  * The phrase for a directory that could not be read, from the errno alone,
@@ -1213,7 +1213,7 @@ function describeUnreadableDirectory(error: unknown): string | null {
         ? /^(E[A-Z]+)\b/.exec(error.message)?.[1]
         : undefined;
   if (code === undefined) return null;
-  return UNREADABLE_DIRECTORY_REASONS[code] ?? null;
+  return UNREADABLE_DIRECTORY_REASONS.get(code) ?? null;
 }
 
 /**

@@ -35,55 +35,55 @@ function withUnreadableDirectory(
 function home(): Bash {
   const fs = withUnreadableDirectory(
     new InMemoryFs({
-      "/Users/jeremy/.Trash/old.txt": "gone",
-      "/Users/jeremy/Documents/notes.md": "# notes",
-      "/Users/jeremy/Documents/vault/.obsidian/app.json": "{}",
-      "/Users/jeremy/Downloads/paper.pdf": "pdf",
+      "/home/user/.Trash/old.txt": "gone",
+      "/home/user/Documents/notes.md": "# notes",
+      "/home/user/Documents/vault/.obsidian/app.json": "{}",
+      "/home/user/Downloads/paper.pdf": "pdf",
     }),
-    "/Users/jeremy/.Trash",
+    "/home/user/.Trash",
   );
   return new Bash({ fs });
 }
 
 describe("find over an unreadable directory", () => {
   it("names the directory it could not read and keeps going", async () => {
-    const result = await home().exec("find /Users/jeremy -name '*.md'");
+    const result = await home().exec("find /home/user -name '*.md'");
 
-    expect(result.stdout).toBe("/Users/jeremy/Documents/notes.md\n");
-    expect(result.stderr).toBe("find: /Users/jeremy/.Trash: Permission denied\n");
+    expect(result.stdout).toBe("/home/user/Documents/notes.md\n");
+    expect(result.stderr).toBe("find: /home/user/.Trash: Permission denied\n");
     expect(result.exitCode).toBe(1);
   });
 
   it("still lists the directory itself, as GNU find does", async () => {
-    const result = await home().exec("find /Users/jeremy -type d -name '.*'");
+    const result = await home().exec("find /home/user -type d -name '.*'");
 
     expect(result.stdout).toBe(
-      "/Users/jeremy/.Trash\n/Users/jeremy/Documents/vault/.obsidian\n",
+      "/home/user/.Trash\n/home/user/Documents/vault/.obsidian\n",
     );
     expect(result.exitCode).toBe(1);
   });
 
   it("keeps the results reachable through a pipeline", async () => {
     const result = await home().exec(
-      "find /Users/jeremy -name 'app.json' 2>/dev/null | head -1",
+      "find /home/user -name 'app.json' 2>/dev/null | head -1",
     );
 
-    expect(result.stdout).toBe("/Users/jeremy/Documents/vault/.obsidian/app.json\n");
+    expect(result.stdout).toBe("/home/user/Documents/vault/.obsidian/app.json\n");
     expect(result.exitCode).toBe(0);
   });
 
   it("does not call a directory it could not read empty", async () => {
-    const result = await home().exec("find /Users/jeremy -type d -empty");
+    const result = await home().exec("find /home/user -type d -empty");
 
     expect(result.stdout).toBe("");
-    expect(result.stderr).toBe("find: /Users/jeremy/.Trash: Permission denied\n");
+    expect(result.stderr).toBe("find: /home/user/.Trash: Permission denied\n");
   });
 
   it("does not descend into it when it is not asked to read it", async () => {
-    const result = await home().exec("find /Users/jeremy -maxdepth 1 -type d");
+    const result = await home().exec("find /home/user -maxdepth 1 -type d");
 
     expect(result.stdout).toBe(
-      "/Users/jeremy\n/Users/jeremy/.Trash\n/Users/jeremy/Documents\n/Users/jeremy/Downloads\n",
+      "/home/user\n/home/user/.Trash\n/home/user/Documents\n/home/user/Downloads\n",
     );
     expect(result.stderr).toBe("");
     expect(result.exitCode).toBe(0);

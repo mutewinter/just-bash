@@ -232,8 +232,16 @@ export const findCommand: RuntimeCommand = {
       startingPoint: string;
     }
 
+    // A directory the traversal could not read, carried as an effect of its
+    // node so the message lands in traversal order beside the node's own
+    // output, rather than in whatever order the parallel batch settled.
+    interface DiagnosticAction {
+      type: "diagnostic";
+      message: string;
+    }
+
     interface EvaluatedEffect {
-      action: FindAction;
+      action: FindAction | DiagnosticAction;
       path: string;
       printfData: FindResult;
     }
@@ -363,6 +371,8 @@ export const findCommand: RuntimeCommand = {
         depth: number;
         children: WorkItem[];
         pruned: boolean;
+        /** Why the directory could not be read, when it could not. */
+        unreadable?: string;
       }
 
       // Tracing counters
@@ -449,6 +459,7 @@ export const findCommand: RuntimeCommand = {
         const shouldReadDir =
           (shouldDescendIntoSubdirs || needsEmptyCheck) && !earlyPruned;
 
+        let unreadable: string | undefined;
         if (isDirectory && shouldReadDir) {
           const readdirStart = Date.now();
           try {
@@ -461,11 +472,13 @@ export const findCommand: RuntimeCommand = {
             // GNU find names the directory it could not read and carries on,
             // exiting 1 at the end. Throwing here instead turned one unreadable
             // directory into an empty result for the whole search, and on a
-            // home directory there is always one.
+            // home directory there is always one. The message is emitted with
+            // the node's effects, in traversal order, not here in batch order.
             const reason = describeUnreadableDirectory(error);
             if (reason === null) throw error;
-            appendStderr(`find: ${relativePath}: ${reason}\n`);
-            exitCode = 1;
+            unreadable = reason;
+            traceCounters.readdirCalls++;
+            traceCounters.readdirTime += Date.now() - readdirStart;
           }
           if (entriesWithTypes !== null) {
             traversalBudget.checkpoint();
@@ -553,14 +566,47 @@ export const findCommand: RuntimeCommand = {
           depth,
           children: pruned ? [] : children,
           pruned,
+          unreadable,
         };
       }
 
       // Evaluate once in traversal order and retain only actions whose branch was
       // actually reached. Side effects themselves run after traversal is complete.
       function evaluateNode(node: ProcessedNode): EvaluatedEffect[] {
+        const printfData: FindResult = {
+          path: node.relativePath,
+          name: node.name,
+          size: node.stat?.size ?? 0,
+          mtime: node.stat?.mtime?.getTime() ?? Date.now(),
+          mode: node.stat?.mode ?? 0o644,
+          isDirectory: node.isDirectory,
+          depth: node.depth,
+          startingPoint: searchPath,
+        };
+        // Reported whatever -mindepth says, as GNU does: the expression never
+        // ran on it, but the traversal did fail there. Before the node's own
+        // output under -depth, where GNU meets the failure on the way down and
+        // prints the directory on the way back up; after it otherwise.
+        const diagnostics: EvaluatedEffect[] =
+          node.unreadable === undefined
+            ? []
+            : [
+                {
+                  action: {
+                    type: "diagnostic",
+                    message: `find: ${node.relativePath}: ${node.unreadable}\n`,
+                  },
+                  path: node.relativePath,
+                  printfData,
+                },
+              ];
+        const withDiagnostics = (evaluated: EvaluatedEffect[]) =>
+          depthFirst
+            ? [...diagnostics, ...evaluated]
+            : [...evaluated, ...diagnostics];
+
         const atOrBeyondMinDepth = minDepth === null || node.depth >= minDepth;
-        if (!atOrBeyondMinDepth) return [];
+        if (!atOrBeyondMinDepth) return diagnostics;
 
         let matches = true;
         let reachedActions: FindAction[] = [];
@@ -602,18 +648,8 @@ export const findCommand: RuntimeCommand = {
         if (!hasAnyAction && matches) {
           reachedActions = [{ type: "print" }];
         }
-        if (reachedActions.length === 0) return [];
+        if (reachedActions.length === 0) return diagnostics;
 
-        const printfData: FindResult = {
-          path: node.relativePath,
-          name: node.name,
-          size: node.stat?.size ?? 0,
-          mtime: node.stat?.mtime?.getTime() ?? Date.now(),
-          mode: node.stat?.mode ?? 0o644,
-          isDirectory: node.isDirectory,
-          depth: node.depth,
-          startingPoint: searchPath,
-        };
         traversalBudget.checkpoint(reachedActions.length);
         const evaluated: EvaluatedEffect[] = [];
         for (const action of reachedActions) {
@@ -623,7 +659,7 @@ export const findCommand: RuntimeCommand = {
             printfData,
           });
         }
-        return evaluated;
+        return withDiagnostics(evaluated);
       }
 
       // Result collection for ordered results
@@ -849,7 +885,9 @@ export const findCommand: RuntimeCommand = {
           durationMs: totalMs,
           details: {
             path: searchPath,
-            resultsFound: searchResult.effects.length,
+            resultsFound: searchResult.effects.filter(
+              (effect) => effect.action.type !== "diagnostic",
+            ).length,
           },
         });
       }
@@ -861,6 +899,10 @@ export const findCommand: RuntimeCommand = {
     for (const effect of effects) {
       const { action, path: file } = effect;
       switch (action.type) {
+        case "diagnostic":
+          appendStderr(action.message);
+          exitCode = 1;
+          break;
         case "print":
           appendStdout(`${file}\n`);
           break;
@@ -1138,10 +1180,27 @@ function formatCtimeDate(date: Date): string {
 }
 
 /**
- * The phrase GNU find prints for a directory it could not read, from the
- * errno alone. Only the code is repeated: the message behind it can carry a
- * host path, which is not the sandbox's to show. Null for anything that is
- * not a filesystem error, which the caller lets propagate.
+ * The errnos a directory read can fail with that are the directory's own
+ * problem, and what GNU find prints for each. Nothing else is recoverable
+ * here: a cancellation, an execution limit, or a filesystem policy refusal
+ * carries a code of its own and must end the search, not become a line of
+ * stderr, so the phrase comes from this table and never from the error.
+ */
+const UNREADABLE_DIRECTORY_REASONS: Record<string, string> = {
+  EACCES: "Permission denied",
+  EIO: "Input/output error",
+  ELOOP: "Too many levels of symbolic links",
+  ENAMETOOLONG: "File name too long",
+  ENOENT: "No such file or directory",
+  ENOTDIR: "Not a directory",
+  EPERM: "Permission denied",
+};
+
+/**
+ * The phrase for a directory that could not be read, from the errno alone,
+ * or null when the failure is not one of those, in which case it propagates.
+ * The errno is read off `code` when the error carries one and off the
+ * `ECODE: ...` message prefix the virtual filesystems use otherwise.
  */
 function describeUnreadableDirectory(error: unknown): string | null {
   const code =
@@ -1153,21 +1212,8 @@ function describeUnreadableDirectory(error: unknown): string | null {
       : error instanceof Error
         ? /^(E[A-Z]+)\b/.exec(error.message)?.[1]
         : undefined;
-  switch (code) {
-    case "EACCES":
-    case "EPERM":
-      return "Permission denied";
-    case "ENOENT":
-      return "No such file or directory";
-    case "ENOTDIR":
-      return "Not a directory";
-    case "ELOOP":
-      return "Too many levels of symbolic links";
-    case undefined:
-      return null;
-    default:
-      return code;
-  }
+  if (code === undefined) return null;
+  return UNREADABLE_DIRECTORY_REASONS[code] ?? null;
 }
 
 /**

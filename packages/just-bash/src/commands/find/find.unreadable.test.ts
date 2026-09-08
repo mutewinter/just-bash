@@ -4,14 +4,15 @@ import { InMemoryFs } from "../../fs/in-memory-fs/in-memory-fs.js";
 import type { IFileSystem } from "../../fs/interface.js";
 
 /**
- * A filesystem where one directory cannot be listed, the way a home
+ * A filesystem where some directories cannot be listed, the way a home
  * directory's `.Trash` or a protected `Library` folder cannot be on macOS.
- * Both readdir entry points refuse it, since `find` prefers the typed one
- * when the filesystem offers it.
+ * Both readdir entry points refuse them, since `find` prefers the typed one
+ * when the filesystem offers it. Each failing path maps to the message its
+ * read throws with.
  */
-function withUnreadableDirectory(
+function withUnreadableDirectories(
   fs: IFileSystem,
-  unreadable: string,
+  failures: Record<string, string>,
 ): IFileSystem {
   return new Proxy(fs, {
     get(target, prop, receiver) {
@@ -21,8 +22,9 @@ function withUnreadableDirectory(
       }
       if (prop === "readdir" || prop === "readdirWithFileTypes") {
         return async (path: string, ...rest: unknown[]) => {
-          if (path === unreadable) {
-            throw new Error(`EACCES: permission denied, scandir '${path}'`);
+          const message = failures[path];
+          if (message !== undefined) {
+            throw new Error(message);
           }
           return value.call(target, path, ...rest);
         };
@@ -32,15 +34,21 @@ function withUnreadableDirectory(
   }) as IFileSystem;
 }
 
-function home(): Bash {
-  const fs = withUnreadableDirectory(
+const PERMISSION_DENIED = "EACCES: permission denied, scandir";
+
+function home(
+  failures: Record<string, string> = {
+    "/home/user/.Trash": `${PERMISSION_DENIED} '/home/user/.Trash'`,
+  },
+): Bash {
+  const fs = withUnreadableDirectories(
     new InMemoryFs({
       "/home/user/.Trash/old.txt": "gone",
       "/home/user/Documents/notes.md": "# notes",
       "/home/user/Documents/vault/.obsidian/app.json": "{}",
       "/home/user/Downloads/paper.pdf": "pdf",
     }),
-    "/home/user/.Trash",
+    failures,
   );
   return new Bash({ fs });
 }
@@ -68,7 +76,9 @@ describe("find over an unreadable directory", () => {
       "find /home/user -name 'app.json' 2>/dev/null | head -1",
     );
 
-    expect(result.stdout).toBe("/home/user/Documents/vault/.obsidian/app.json\n");
+    expect(result.stdout).toBe(
+      "/home/user/Documents/vault/.obsidian/app.json\n",
+    );
     expect(result.exitCode).toBe(0);
   });
 
@@ -87,5 +97,52 @@ describe("find over an unreadable directory", () => {
     );
     expect(result.stderr).toBe("");
     expect(result.exitCode).toBe(0);
+  });
+
+  const TWO_UNREADABLE = {
+    "/home/user/.Trash": `${PERMISSION_DENIED} '/home/user/.Trash'`,
+    "/home/user/Documents/vault": `${PERMISSION_DENIED} '/home/user/Documents/vault'`,
+  };
+  const TWO_MESSAGES =
+    "find: /home/user/.Trash: Permission denied\nfind: /home/user/Documents/vault: Permission denied\n";
+
+  it("reports every unreadable directory in traversal order", async () => {
+    const result = await home(TWO_UNREADABLE).exec("find /home/user -type d");
+
+    expect(result.stdout).toBe(
+      "/home/user\n/home/user/.Trash\n/home/user/Documents\n/home/user/Documents/vault\n/home/user/Downloads\n",
+    );
+    expect(result.stderr).toBe(TWO_MESSAGES);
+    expect(result.exitCode).toBe(1);
+  });
+
+  it("keeps that order under -depth", async () => {
+    const result = await home(TWO_UNREADABLE).exec(
+      "find /home/user -depth -type d",
+    );
+
+    expect(result.stdout).toBe(
+      "/home/user/.Trash\n/home/user/Documents/vault\n/home/user/Documents\n/home/user/Downloads\n/home/user\n",
+    );
+    expect(result.stderr).toBe(TWO_MESSAGES);
+  });
+
+  it("reports a directory below -mindepth all the same", async () => {
+    const result = await home().exec(
+      "find /home/user -mindepth 2 -name '*.md'",
+    );
+
+    expect(result.stdout).toBe("/home/user/Documents/notes.md\n");
+    expect(result.stderr).toBe("find: /home/user/.Trash: Permission denied\n");
+  });
+
+  it("lets a failure that is not the directory's own end the search", async () => {
+    const result = await home({
+      "/home/user/.Trash": "ABORT_ERR: The operation was aborted",
+    }).exec("find /home/user -name '*.md'");
+
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("ABORT_ERR");
+    expect(result.exitCode).toBe(1);
   });
 });

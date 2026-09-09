@@ -107,6 +107,7 @@ function expandFormat(
         width === "" ? 0 : Number.parseInt(width, 10),
         maxOutputBytes,
       );
+      // @banned-pattern-ignore: target is bounded by maxOutputBytes directly above
       out += leftAlign ? value.padEnd(target) : value.padStart(target, padding);
       index = cursor + 1;
     }

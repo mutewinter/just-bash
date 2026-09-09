@@ -29,12 +29,12 @@ describe("stat -c - Real Bash Comparison", () => {
 
   it("prints mode and type for a file", async () => {
     const env = await setupFiles(testDir, { "file.txt": "hello world" });
-    await compareOutputs(env, testDir, "stat -c '%a %A %F' file.txt");
+    await compareOutputs(env, testDir, "stat -c '%a %A %f %F' file.txt");
   });
 
   it("prints mode and type for a directory", async () => {
     const env = await setupFiles(testDir, { "dir/file.txt": "hello" });
-    await compareOutputs(env, testDir, "stat -c '%a %A %F' dir");
+    await compareOutputs(env, testDir, "stat -c '%a %A %f %F' dir");
   });
 
   it("prints a literal percent, and ? for an unknown directive", async () => {

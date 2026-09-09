@@ -24,9 +24,9 @@ describe("stat -c timestamps", () => {
     expect(result.exitCode).toBe(0);
   });
 
-  it("shows access and change times as the modification time", async () => {
-    const result = await envWithFile().exec("stat -c '%X %Z %Y' /test.txt");
-    expect(result.stdout).toBe("1705310234 1705310234 1705310234\n");
+  it("leaves access and change times unanswered", async () => {
+    const result = await envWithFile().exec("stat -c '%x %X %z %Z' /test.txt");
+    expect(result.stdout).toBe("? ? ? ?\n");
     expect(result.stderr).toBe("");
     expect(result.exitCode).toBe(0);
   });
@@ -73,6 +73,24 @@ describe("stat -c directives", () => {
       "stat -c 'i=[%i] q=[%q]' /test.txt",
     );
     expect(result.stdout).toBe("i=[?] q=[?]\n");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("prints %f as the raw mode in hexadecimal", async () => {
+    const result = await envWithFile().exec("stat -c '%f' /test.txt");
+    expect(result.stdout).toBe("81a4\n");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("formats no wall clock for a FORMAT that names none", async () => {
+    const env = new Bash({
+      files: { "/test.txt": { content: "hello world", mtime: MTIME } },
+      executionLimits: { maxOutputSize: 12 },
+    });
+    const result = await env.exec("stat -c '%s' /test.txt");
+    expect(result.stdout).toBe("11\n");
     expect(result.stderr).toBe("");
     expect(result.exitCode).toBe(0);
   });

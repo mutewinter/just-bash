@@ -20,10 +20,11 @@ const statHelp = {
     "    --help  display this help and exit",
   ],
   notes: [
-    "FORMAT directives: %a %A %F %g %G %n %N %s %u %U, the timestamps",
-    "%w %W %x %X %y %Y %z %Z, and %% for a literal percent.",
-    "A directive naming something this filesystem does not record prints",
-    "'?', the same as an unknown directive.",
+    "FORMAT directives: %a %A %f %F %g %G %n %N %s %u %U, the modification",
+    "times %y and %Y, %w and %W for a birth time nothing records, and %%",
+    "for a literal percent. A directive naming something this filesystem",
+    "does not record, access and change times among them, prints '?', the",
+    "same as an unknown directive.",
   ],
 };
 
@@ -70,10 +71,14 @@ function formatTimestamp(
  * Expand a `-c` FORMAT: `%` followed by optional `-`/`0` flags, an optional
  * width, and a directive. A directive with no value prints `?` rather than
  * reaching the caller as itself, which reads as output rather than as a gap.
+ *
+ * `resolve` is asked only for the directives a FORMAT actually names, so a
+ * value that costs something to build is not built for a format that does not
+ * use it.
  */
 function expandFormat(
   format: string,
-  values: Map<string, string>,
+  resolve: (directive: string) => string | undefined,
   maxOutputBytes: number,
 ): string {
   let out = "";
@@ -102,7 +107,7 @@ function expandFormat(
         out += format.slice(index);
         break;
       }
-      const value = directive === "%" ? "%" : (values.get(directive) ?? "?");
+      const value = directive === "%" ? "%" : (resolve(directive) ?? "?");
       const target = Math.min(
         width === "" ? 0 : Number.parseInt(width, 10),
         maxOutputBytes,
@@ -175,37 +180,50 @@ export const statCommand: RuntimeCommand = {
 
         if (format) {
           // Handle custom format
-          const modeStr = formatMode(stat.mode, stat.isDirectory);
-          const timestamp = formatTimestamp(stat.mtime, timezone, {
-            maxOperations: ctx.limits.maxLoopIterations,
-            maxOutputBytes,
-          });
-          const epoch = String(Math.floor(stat.mtime.getTime() / 1000));
           const values = new Map<string, string>([
             ["n", file],
             ["N", `'${file}'`],
             ["s", String(stat.size)],
             ["F", stat.isDirectory ? "directory" : "regular file"],
             ["a", (stat.mode & 0o7777).toString(8)],
-            ["A", modeStr],
+            ["A", formatMode(stat.mode, stat.isDirectory)],
+            // The type bits are composed rather than read off `mode`, which
+            // carries them on some filesystems and not others, the same
+            // reason `formatMode` is passed `isDirectory` separately.
+            [
+              "f",
+              (
+                (stat.isDirectory ? 0o040000 : 0o100000) |
+                (stat.mode & 0o7777)
+              ).toString(16),
+            ],
             ["u", "1000"],
             ["U", "user"],
             ["g", "1000"],
             ["G", "group"],
-            // The filesystem keeps one timestamp per file, so access and
-            // change report the modification time rather than a value it
-            // does not have. Birth time it does not track at all, which GNU
-            // renders as `-` and `0`.
-            ["x", timestamp],
-            ["X", epoch],
-            ["y", timestamp],
-            ["Y", epoch],
-            ["z", timestamp],
-            ["Z", epoch],
+            ["Y", String(Math.floor(stat.mtime.getTime() / 1000))],
+            // Birth time is not recorded, which GNU renders as `-` and `0`.
+            // Access and change times are not either, and they are left to
+            // the `?` every unanswerable directive gets: reporting the
+            // modification time for them would be a plausible wrong answer
+            // on a filesystem where the three genuinely differ.
             ["w", "-"],
             ["W", "0"],
           ]);
-          appendStdout(`${expandFormat(format, values, maxOutputBytes)}\n`);
+          // Formatted on demand, so a FORMAT that names no wall clock does
+          // not pay for one, and cannot fail a limit its own output fits.
+          let wallClock: string | undefined;
+          const resolve = (directive: string) => {
+            if (directive !== "y") return values.get(directive);
+            if (wallClock === undefined) {
+              wallClock = formatTimestamp(stat.mtime, timezone, {
+                maxOperations: ctx.limits.maxLoopIterations,
+                maxOutputBytes,
+              });
+            }
+            return wallClock;
+          };
+          appendStdout(`${expandFormat(format, resolve, maxOutputBytes)}\n`);
         } else {
           // Default format
           const modeOctal = stat.mode.toString(8).padStart(4, "0");

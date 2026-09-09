@@ -9,22 +9,22 @@
     "exitCode": 0,
     "locked": true
   },
-  "5f519ffb4d631e5d": {
-    "command": "stat -c '%a %A %F' file.txt",
+  "677edb3d0ea90e66": {
+    "command": "stat -c '%a %A %f %F' file.txt",
     "files": {
       "file.txt": "hello world"
     },
-    "stdout": "644 -rw-r--r-- regular file\n",
+    "stdout": "644 -rw-r--r-- 81a4 regular file\n",
     "stderr": "",
     "exitCode": 0,
     "locked": true
   },
-  "30282a8d3bb85add": {
-    "command": "stat -c '%a %A %F' dir",
+  "261ac1f4f95deac0": {
+    "command": "stat -c '%a %A %f %F' dir",
     "files": {
       "dir/file.txt": "hello"
     },
-    "stdout": "755 drwxr-xr-x directory\n",
+    "stdout": "755 drwxr-xr-x 41ed directory\n",
     "stderr": "",
     "exitCode": 0,
     "locked": true

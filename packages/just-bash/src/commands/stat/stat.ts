@@ -9,6 +9,7 @@ import type {
 import { parseArgs } from "../../utils/args.js";
 import { formatMode } from "../format-mode.js";
 import { hasHelpFlag, showHelp } from "../help.js";
+import { formatStrftime } from "../printf/strftime.js";
 
 const statHelp = {
   name: "stat",
@@ -18,11 +19,106 @@ const statHelp = {
     "-c FORMAT   use the specified FORMAT instead of the default",
     "    --help  display this help and exit",
   ],
+  notes: [
+    "FORMAT directives: %a %A %F %g %G %n %N %s %u %U, the timestamps",
+    "%w %W %x %X %y %Y %z %Z, and %% for a literal percent.",
+    "A directive naming something this filesystem does not record prints",
+    "'?', the same as an unknown directive.",
+  ],
 };
 
 const argDefs = {
   format: { short: "c", type: "string" as const },
 };
+
+const NANOSECONDS_PER_MILLISECOND = 1_000_000;
+
+/**
+ * The timezone timestamps are shown in, on the same contract as `date`: $TZ
+ * when Intl accepts it, UTC otherwise, so the host zone never leaks unless the
+ * caller opts in.
+ */
+function displayTimezone(tz: string | undefined): string {
+  if (!tz) return "UTC";
+  try {
+    new Intl.DateTimeFormat(undefined, { timeZone: tz });
+    return tz;
+  } catch {
+    return "UTC";
+  }
+}
+
+/**
+ * A timestamp in GNU's `%y` form: `2024-01-15 09:17:14.764000000 +0000`.
+ * The filesystem stores milliseconds, so the last six digits are always zero.
+ */
+function formatTimestamp(
+  when: Date,
+  tz: string,
+  limits: { maxOperations: number; maxOutputBytes: number },
+): string {
+  const seconds = Math.floor(when.getTime() / 1000);
+  const nanoseconds = String(
+    when.getMilliseconds() * NANOSECONDS_PER_MILLISECOND,
+  ).padStart(9, "0");
+  const wall = formatStrftime("%Y-%m-%d %H:%M:%S", seconds, tz, limits);
+  const offset = formatStrftime("%z", seconds, tz, limits);
+  return `${wall}.${nanoseconds} ${offset}`;
+}
+
+/**
+ * Expand a `-c` FORMAT: `%` followed by optional `-`/`0` flags, an optional
+ * width, and a directive. A directive with no value prints `?` rather than
+ * reaching the caller as itself, which reads as output rather than as a gap.
+ */
+function expandFormat(
+  format: string,
+  values: Map<string, string>,
+  maxOutputBytes: number,
+): string {
+  let out = "";
+  let index = 0;
+  while (index < format.length) {
+    if (format[index] !== "%") {
+      out += format[index];
+      index++;
+    } else {
+      let cursor = index + 1;
+      let leftAlign = false;
+      let padding = " ";
+      while (format[cursor] === "-" || format[cursor] === "0") {
+        if (format[cursor] === "-") leftAlign = true;
+        else padding = "0";
+        cursor++;
+      }
+      let width = "";
+      while (format[cursor] >= "0" && format[cursor] <= "9") {
+        width += format[cursor];
+        cursor++;
+      }
+      const directive = format[cursor];
+      if (directive === undefined) {
+        // A `%` that runs off the end of FORMAT is printed as itself.
+        out += format.slice(index);
+        break;
+      }
+      const value = directive === "%" ? "%" : (values.get(directive) ?? "?");
+      const target = Math.min(
+        width === "" ? 0 : Number.parseInt(width, 10),
+        maxOutputBytes,
+      );
+      out += leftAlign ? value.padEnd(target) : value.padStart(target, padding);
+      index = cursor + 1;
+    }
+    if (out.length > maxOutputBytes) {
+      throw new ExecutionLimitError(
+        `stat: output size limit exceeded (${maxOutputBytes} bytes)`,
+        "output_size",
+      );
+    }
+  }
+  return out;
+}
 
 export const statCommand: RuntimeCommand = {
   name: "stat",
@@ -57,6 +153,7 @@ export const statCommand: RuntimeCommand = {
       ctx.limits.maxOutputSize,
       ctx.limits.maxStringLength,
     );
+    const timezone = displayTimezone(ctx.env.get("TZ"));
     const appendStdout = (value: string): void => {
       const valueBytes = utf8ByteLength(value);
       if (valueBytes > maxOutputBytes - stdoutBytes) {
@@ -77,24 +174,37 @@ export const statCommand: RuntimeCommand = {
 
         if (format) {
           // Handle custom format
-          const modeOctal = stat.mode.toString(8);
           const modeStr = formatMode(stat.mode, stat.isDirectory);
-          const replacements = new Map<string, string>([
-            ["%n", file],
-            ["%N", `'${file}'`],
-            ["%s", String(stat.size)],
-            ["%F", stat.isDirectory ? "directory" : "regular file"],
-            ["%a", modeOctal],
-            ["%A", modeStr],
-            ["%u", "1000"],
-            ["%U", "user"],
-            ["%g", "1000"],
-            ["%G", "group"],
-          ]);
-          const output = format.replace(/%[nNsFaAuUgG]/g, (directive) => {
-            return replacements.get(directive) ?? directive;
+          const timestamp = formatTimestamp(stat.mtime, timezone, {
+            maxOperations: ctx.limits.maxLoopIterations,
+            maxOutputBytes,
           });
-          appendStdout(`${output}\n`);
+          const epoch = String(Math.floor(stat.mtime.getTime() / 1000));
+          const values = new Map<string, string>([
+            ["n", file],
+            ["N", `'${file}'`],
+            ["s", String(stat.size)],
+            ["F", stat.isDirectory ? "directory" : "regular file"],
+            ["a", (stat.mode & 0o7777).toString(8)],
+            ["A", modeStr],
+            ["u", "1000"],
+            ["U", "user"],
+            ["g", "1000"],
+            ["G", "group"],
+            // The filesystem keeps one timestamp per file, so access and
+            // change report the modification time rather than a value it
+            // does not have. Birth time it does not track at all, which GNU
+            // renders as `-` and `0`.
+            ["x", timestamp],
+            ["X", epoch],
+            ["y", timestamp],
+            ["Y", epoch],
+            ["z", timestamp],
+            ["Z", epoch],
+            ["w", "-"],
+            ["W", "0"],
+          ]);
+          appendStdout(`${expandFormat(format, values, maxOutputBytes)}\n`);
         } else {
           // Default format
           const modeOctal = stat.mode.toString(8).padStart(4, "0");

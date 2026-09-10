@@ -21,6 +21,13 @@ import {
 } from "../path-utils.js";
 
 /**
+ * How many entries a failed cross-mount copy names in its error. A tree with
+ * thousands of symlinks the destination refuses (a node_modules) is still one
+ * error, not one the size of the tree.
+ */
+const CROSS_MOUNT_COPY_FAILURES_REPORTED = 10;
+
+/**
  * Configuration for a mount point
  */
 export interface MountConfig {
@@ -631,11 +638,34 @@ export class MountableFs implements IFileSystem {
 
   /**
    * Perform a cross-mount copy operation.
+   *
+   * A directory is copied entry by entry, and an entry that cannot be copied
+   * (a symlink the destination refuses to create, a file it refuses to write)
+   * does not end the walk: every other entry is still copied, and the failures
+   * are thrown together once the tree is done, the way GNU cp reports each
+   * entry it could not copy and exits 1 at the end.
    */
   private async crossMountCopy(
     src: string,
     dest: string,
     options?: CpOptions,
+  ): Promise<void> {
+    const failures: string[] = [];
+    await this.crossMountCopyEntry(src, dest, options, failures);
+    if (failures.length > 0) {
+      const reported = failures.slice(0, CROSS_MOUNT_COPY_FAILURES_REPORTED);
+      const unreported = failures.length - reported.length;
+      throw new Error(
+        `copied all but ${failures.length} ${failures.length === 1 ? "entry" : "entries"}: ${reported.join("; ")}${unreported > 0 ? `; and ${unreported} more` : ""}`,
+      );
+    }
+  }
+
+  private async crossMountCopyEntry(
+    src: string,
+    dest: string,
+    options: CpOptions | undefined,
+    failures: string[],
   ): Promise<void> {
     const srcStat = await this.lstat(src);
 
@@ -652,7 +682,16 @@ export class MountableFs implements IFileSystem {
       for (const child of children) {
         const srcChild = joinPath(src, child);
         const destChild = joinPath(dest, child);
-        await this.crossMountCopy(srcChild, destChild, options);
+        try {
+          await this.crossMountCopyEntry(
+            srcChild,
+            destChild,
+            options,
+            failures,
+          );
+        } catch (error) {
+          failures.push(error instanceof Error ? error.message : String(error));
+        }
       }
     } else if (srcStat.isSymbolicLink) {
       const target = await this.readlink(src);

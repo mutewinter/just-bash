@@ -1,5 +1,11 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { Bash } from "../../Bash.js";
+import { InMemoryFs } from "../../fs/in-memory-fs/in-memory-fs.js";
+import { MountableFs } from "../../fs/mountable-fs/mountable-fs.js";
+import { OverlayFs } from "../../fs/overlay-fs/overlay-fs.js";
 
 // Note: These tests use CPython Emscripten which loads ~9MB WASM on first run.
 // The first test will be slow, subsequent tests reuse the worker.
@@ -157,6 +163,51 @@ EOF`);
       expect(result.stderr).toBe("");
       expect(result.stdout).toBe("42\n");
       expect(result.exitCode).toBe(0);
+    });
+  });
+
+  describe("errors from the host filesystem", () => {
+    it("reports a file over the size limit as EFBIG, once", async () => {
+      const env = new Bash({
+        python: true,
+        executionLimits: { maxStringLength: 128 },
+      });
+      await env.fs.writeFile("/tmp/big.bin", "x".repeat(256));
+      const result = await env.exec(
+        `python3 -c "print(len(open('/tmp/big.bin').read()))"`,
+      );
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain(
+        "OSError: [Errno 22] File too large: '/host/tmp/big.bin'",
+      );
+      expect(result.stderr).not.toContain("No file descriptors available");
+      expect(result.exitCode).toBe(1);
+    });
+
+    it("reports a write into a read-only mount as EROFS", async () => {
+      const root = mkdtempSync(join(tmpdir(), "python3-readonly-"));
+      writeFileSync(join(root, "note.txt"), "hello\n");
+      const fs = new MountableFs({ base: new InMemoryFs() });
+      fs.mount(
+        "/mnt/ro",
+        new OverlayFs({ mountPoint: "/", readOnly: true, root }),
+      );
+      const env = new Bash({ cwd: "/", fs, python: true });
+
+      const read = await env.exec(
+        `python3 -c "print(open('/mnt/ro/note.txt').read(), end='')"`,
+      );
+      expect(read.stdout).toBe("hello\n");
+      expect(read.exitCode).toBe(0);
+
+      const write = await env.exec(
+        `python3 -c "f = open('/mnt/ro/new.txt', 'w'); f.write('x'); f.close()"`,
+      );
+      expect(write.stderr).toContain(
+        "OSError: [Errno 69] Read-only file system: '/host/mnt/ro/new.txt'",
+      );
+      expect(write.exitCode).toBe(1);
+      expect(await fs.exists("/mnt/ro/new.txt")).toBe(false);
     });
   });
 

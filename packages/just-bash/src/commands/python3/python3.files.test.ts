@@ -160,6 +160,70 @@ EOF`);
     });
   });
 
+  describe("tracebacks and the program's namespace", () => {
+    it("names <string> and the program's own line for -c code", async () => {
+      const env = new Bash({ python: true });
+      const result = await env.exec(`python3 -c "import json
+x = 1
+raise KeyError(2)"`);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe(
+        'Traceback (most recent call last):\n  File "<string>", line 3, in <module>\nKeyError: 2\n',
+      );
+      expect(result.exitCode).toBe(1);
+    });
+
+    it("names a script file by its path and its own lines", async () => {
+      const env = new Bash({ python: true });
+      await env.exec(`cat > /tmp/report.py << 'EOF'
+def fail():
+    raise ValueError("boom")
+
+fail()
+EOF`);
+      const result = await env.exec("cd /tmp && python3 report.py");
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe(
+        [
+          "Traceback (most recent call last):",
+          '  File "report.py", line 4, in <module>',
+          "    fail()",
+          "    ~~~~^^",
+          '  File "report.py", line 2, in fail',
+          '    raise ValueError("boom")',
+          "ValueError: boom",
+          "",
+        ].join("\n"),
+      );
+      expect(result.exitCode).toBe(1);
+    });
+
+    it("sets __file__ and puts the script's directory on sys.path", async () => {
+      const env = new Bash({ python: true });
+      await env.exec(
+        "mkdir -p /tmp/app && echo 'ANSWER = 42' > /tmp/app/helper.py",
+      );
+      await env.exec(`cat > /tmp/app/main.py << 'EOF'
+import helper
+print(__file__, __name__, helper.ANSWER)
+EOF`);
+      const result = await env.exec("python3 /tmp/app/main.py");
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe("/tmp/app/main.py __main__ 42\n");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("keeps the wrapper's own imports out of the program's globals", async () => {
+      const env = new Bash({ python: true });
+      const result = await env.exec(
+        `python3 -c "print(sorted(k for k in globals() if not k.startswith('__')))"`,
+      );
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe("[]\n");
+      expect(result.exitCode).toBe(0);
+    });
+  });
+
   describe("directory operations", () => {
     it("should list directory contents", async () => {
       const env = new Bash({ python: true });

@@ -167,6 +167,7 @@ python3 -c "import os; print(os.getcwd())"
         `python3 -c "import sys; sys.exit('error message')"`,
       );
       // sys.exit with string message prints to stderr and exits with 1
+      expect(result.stderr).toBe("error message\n");
       expect(result.exitCode).toBe(1);
     });
 

@@ -33,6 +33,12 @@ export interface WorkerInput {
   env: Record<string, string>;
   args: string[];
   scriptPath?: string;
+  /**
+   * The name the program is compiled under, which is what a traceback shows:
+   * a script file's path as typed, or `<stdin>`. Undefined compiles it as
+   * `<string>`, the name CPython gives `-c` code.
+   */
+  fileName?: string;
   timeoutMs?: number;
   /** Maximum size of one HOSTFS file, enforced before guest allocations. */
   maxFileSize?: number;
@@ -1419,6 +1425,27 @@ async function runPython(input: WorkerInput): Promise<WorkerOutput> {
   // Create the setup + user code as a single Python script
   const setupCode = generateSetupCode(input);
   const httpBridgeCode = generateHttpBridgeCode();
+  // The program is compiled under its own name and run in a fresh __main__
+  // namespace rather than pasted into this wrapper, so a traceback names
+  // the script and its own line numbers, the wrapper's helpers stay out of
+  // its globals, and sys.path[0] and __file__ are what CPython would set.
+  // JSON escapes are a subset of Python string escapes, so JSON.stringify
+  // yields a valid Python literal.
+  const isScriptFile =
+    input.fileName !== undefined && input.fileName !== "<stdin>";
+  const fileName = input.fileName ?? "<string>";
+  const programCode = `
+import builtins as _jb_builtins
+_jb_main = {'__name__': '__main__', '__builtins__': _jb_builtins, '__doc__': None, '__package__': None, '__spec__': None, '__loader__': None}
+if ${isScriptFile ? "True" : "False"}:
+    _jb_main['__file__'] = os.path.abspath(${JSON.stringify(fileName)})
+    sys.path.insert(0, '/host' + os.path.dirname(_jb_main['__file__']))
+else:
+    sys.path.insert(0, '')
+_jb_code = compile(${JSON.stringify(input.pythonCode)}, ${JSON.stringify(fileName)}, 'exec')
+del _jb_builtins
+exec(_jb_code, _jb_main)
+`;
   const wrappedCode = `
 import sys
 _jb_exit_code = 0
@@ -1431,15 +1458,18 @@ ${httpBridgeCode
   .split("\n")
   .map((line) => `    ${line}`)
   .join("\n")}
-${input.pythonCode
+${programCode
   .split("\n")
   .map((line) => `    ${line}`)
   .join("\n")}
 except SystemExit as e:
+    if e.code is not None and not isinstance(e.code, int):
+        print(e.code, file=sys.stderr)
     _jb_exit_code = e.code if isinstance(e.code, int) else (1 if e.code else 0)
 except Exception as e:
     import traceback
-    traceback.print_exc()
+    _jb_tb = e.__traceback__
+    traceback.print_exception(type(e), e, _jb_tb.tb_next if _jb_tb is not None and _jb_tb.tb_next is not None else _jb_tb)
     _jb_exit_code = 1
 sys.exit(_jb_exit_code)
 `;

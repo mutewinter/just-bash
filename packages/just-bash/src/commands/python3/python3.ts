@@ -477,6 +477,7 @@ async function executePython(
   ctx: RuntimeCommandContext,
   scriptPath?: string,
   scriptArgs: string[] = [],
+  fileName?: string,
 ): Promise<ExecResult> {
   const sharedBuffer = createSharedBuffer();
   const bridgeHandler = new BridgeHandler(
@@ -516,6 +517,7 @@ async function executePython(
     env: mapToRecord(ctx.env),
     args: scriptArgs,
     scriptPath,
+    fileName,
     timeoutMs,
     maxFileSize: ctx.limits.maxStringLength,
   };
@@ -653,6 +655,10 @@ export const python3Command: RuntimeCommand = {
 
     let pythonCode: string;
     let scriptPath: string | undefined;
+    // What the program is compiled under, so a traceback names it: the
+    // script's path as typed, `<stdin>` for a program read from stdin, and
+    // `<string>` (the default) for `-c` code and `-m` bootstraps.
+    let fileName: string | undefined;
     let stdin = latin1FromBytes(ctx.stdin);
 
     if (parsed.code !== null) {
@@ -678,6 +684,7 @@ export const python3Command: RuntimeCommand = {
       pythonCode = decodeBytesToUtf8(ctx.stdin);
       stdin = "";
       scriptPath = "-";
+      fileName = "<stdin>";
     } else if (parsed.scriptFile !== null) {
       const filePath = ctx.fs.resolvePath(ctx.cwd, parsed.scriptFile);
 
@@ -692,6 +699,7 @@ export const python3Command: RuntimeCommand = {
       try {
         pythonCode = await ctx.fs.readFile(filePath);
         scriptPath = parsed.scriptFile;
+        fileName = parsed.scriptFile;
       } catch (e) {
         const message = sanitizeErrorMessage((e as Error).message);
         return {
@@ -704,6 +712,7 @@ export const python3Command: RuntimeCommand = {
       pythonCode = decodeBytesToUtf8(ctx.stdin);
       stdin = "";
       scriptPath = "<stdin>";
+      fileName = "<stdin>";
     } else {
       return {
         stdout: "",
@@ -713,7 +722,14 @@ export const python3Command: RuntimeCommand = {
       };
     }
 
-    return executePython(pythonCode, stdin, ctx, scriptPath, parsed.scriptArgs);
+    return executePython(
+      pythonCode,
+      stdin,
+      ctx,
+      scriptPath,
+      parsed.scriptArgs,
+      fileName,
+    );
   },
 };
 

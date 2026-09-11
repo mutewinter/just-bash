@@ -184,6 +184,23 @@ EOF`);
       expect(result.exitCode).toBe(1);
     });
 
+    it("refuses to append to a file the bridge cannot carry rather than replace it", async () => {
+      // Over the bridge buffer rather than over maxStringLength, so the read
+      // fails inside the bridge and open() has to classify the failure
+      // before its create fallback: append mode opens with O_CREAT.
+      const env = new Bash({ python: true });
+      const original = "x".repeat(9 * 1024 * 1024);
+      await env.fs.writeFile("/tmp/big.log", original);
+      const result = await env.exec(
+        `python3 -c "f = open('/tmp/big.log', 'a'); f.write('tail'); f.close()"`,
+      );
+      expect(result.stderr).toContain(
+        "OSError: [Errno 22] File too large: '/host/tmp/big.log'",
+      );
+      expect(result.exitCode).toBe(1);
+      expect(await env.fs.readFile("/tmp/big.log")).toBe(original);
+    });
+
     it("reports a write into a read-only mount as EROFS", async () => {
       const root = mkdtempSync(join(tmpdir(), "python3-readonly-"));
       writeFileSync(join(root, "note.txt"), "hello\n");

@@ -557,17 +557,19 @@ function createHOSTFS(
             content = backend.readFile(path);
           }
         } catch (e) {
+          // The bridge refuses a file its buffer cannot carry; that is a
+          // size limit, not a missing file, and it is checked before the
+          // create fallback: an append opens with O_CREAT, and treating the
+          // failed read as an empty file would write only the appended bytes
+          // back over the whole file on close.
+          const message = e instanceof Error ? e.message : String(e);
+          if (/too large/i.test(message)) {
+            throw new FS.ErrnoError(ERRNO_CODES.EFBIG);
+          }
           if (isCreate && isWrite) {
             content = new Uint8Array(0);
           } else {
-            // The bridge refuses a file its buffer cannot carry; that is a
-            // size limit, not a missing file.
-            const message = e instanceof Error ? e.message : String(e);
-            throw new FS.ErrnoError(
-              /too large/i.test(message)
-                ? ERRNO_CODES.EFBIG
-                : ERRNO_CODES.ENOENT,
-            );
+            throw new FS.ErrnoError(ERRNO_CODES.ENOENT);
           }
         }
 

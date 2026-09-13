@@ -148,6 +148,11 @@ describe("js-exec", () => {
       ["an empty program", `js-exec -p ""`, "undefined\n"],
       ["a semicolon alone", `js-exec -p ";"`, "undefined\n"],
       ["a regular expression", `js-exec -p "/x/g"`, "/x/g\n"],
+      [
+        "a regular expression ending in an escaped slash",
+        `js-exec -p "/https:\\/\\//"`,
+        "/https:\\/\\//\n",
+      ],
       ["a symbol", `js-exec -p "Symbol('x')"`, "Symbol(x)\n"],
       ["a bigint", `js-exec -p "10n"`, "10n\n"],
       ["a named function", `js-exec -p "(function f() {})"`, "[Function: f]\n"],

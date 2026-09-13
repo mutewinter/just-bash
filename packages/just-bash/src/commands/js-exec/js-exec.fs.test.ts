@@ -201,6 +201,20 @@ describe("js-exec fs operations", () => {
       expect(result.exitCode).toBe(0);
     });
 
+    it("should refuse a file with ENOTDIR, recursive or not", async () => {
+      const env = new Bash({
+        javascript: true,
+        files: { "/home/user/a.txt": "a" },
+      });
+      const result = await env.exec(
+        `js-exec -c "const codes = []; for (const opts of [undefined, { recursive: true }, { withFileTypes: true }]) { try { fs.readdirSync('/home/user/a.txt', opts) } catch (e) { codes.push(e.code + ':' + e.syscall) } } console.log(codes.join(' '))"`,
+      );
+      expect(result.stdout).toBe(
+        "ENOTDIR:scandir ENOTDIR:scandir ENOTDIR:scandir\n",
+      );
+      expect(result.exitCode).toBe(0);
+    });
+
     it("should keep the path as given in a Dirent's parentPath", async () => {
       const env = new Bash({
         javascript: true,

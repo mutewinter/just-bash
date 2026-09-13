@@ -1081,8 +1081,12 @@ async function executeWithRunInner(
               }
               // The listed directory is followed if it is a symlink, as
               // node follows it; symlinks met below it are listed and not
-              // entered.
+              // entered. A file is refused up front, since the walk would
+              // otherwise answer for it with an empty list.
               const root = await ctx.fs.realpath(resolved);
+              if (!(await ctx.fs.stat(root)).isDirectory) {
+                throw new Error(`ENOTDIR: not a directory, scandir '${path}'`);
+              }
               const entries: TypedDirent[] = [];
               await traverseFileTree(
                 {

@@ -12,6 +12,8 @@ Usage: js-exec [OPTIONS] [-c CODE | FILE] [ARGS...]
 
 Options:
   -c CODE          Execute inline code
+  -e, --eval CODE  Execute inline code (same as -c)
+  -p, --print EXPR Evaluate an expression and print its value
   -m, --module     Enable ES module mode (import/export)
   --strip-types    Accepted for compatibility; type stripping is automatic
   --version, -V    Show version
@@ -46,16 +48,30 @@ Limits:
 
 interface ParsedArgs {
   code: string | null;
+  print: boolean;
   scriptFile: string | null;
   showVersion: boolean;
   scriptArgs: string[];
   isModule: boolean;
 }
 
+/** Options that take inline code, spelled the way `js-exec` and `node` take them. */
+const INLINE_CODE_OPTIONS: Record<string, { print: boolean }> = Object.assign(
+  Object.create(null) as Record<string, { print: boolean }>,
+  {
+    "--eval": { print: false },
+    "--print": { print: true },
+    "-c": { print: false },
+    "-e": { print: false },
+    "-p": { print: true },
+  },
+);
+
 function parseArgs(args: string[]): ParsedArgs | ExecResult {
   const result: ParsedArgs = {
     code: null,
     isModule: false,
+    print: false,
     scriptArgs: [],
     scriptFile: null,
     showVersion: false,
@@ -71,16 +87,26 @@ function parseArgs(args: string[]): ParsedArgs | ExecResult {
       // Node-compatible flag as an explicit compatibility alias.
       continue;
     }
-    if (arg === "-c") {
-      if (index + 1 >= args.length) {
-        return {
-          exitCode: 2,
-          stderr: "js-exec: option requires an argument -- 'c'\n",
-          stdout: "",
-        };
+    // `--eval=CODE` and `--print=CODE` carry the code in the same argument.
+    const separator = arg.startsWith("--") ? arg.indexOf("=") : -1;
+    const option = separator === -1 ? arg : arg.slice(0, separator);
+    const inline = INLINE_CODE_OPTIONS[option];
+    if (inline !== undefined) {
+      if (separator !== -1) {
+        result.code = arg.slice(separator + 1);
+        result.scriptArgs = args.slice(index + 1);
+      } else {
+        if (index + 1 >= args.length) {
+          return {
+            exitCode: 2,
+            stderr: `js-exec: option requires an argument -- '${option.replace(/^-+/, "")}'\n`,
+            stdout: "",
+          };
+        }
+        result.code = args[index + 1];
+        result.scriptArgs = args.slice(index + 2);
       }
-      result.code = args[index + 1];
-      result.scriptArgs = args.slice(index + 2);
+      result.print = inline.print;
       return result;
     }
     if (arg === "--version" || arg === "-V") {
@@ -127,7 +153,12 @@ export const jsExecCommand: RuntimeCommand = {
     let source: string;
     let scriptPath: string;
     if (parsed.code !== null) {
-      source = parsed.code;
+      // `-p` prints the value of one expression, which is what node prints
+      // for a single expression statement. The newline keeps a trailing line
+      // comment from swallowing the closing parenthesis.
+      source = parsed.print
+        ? `console.log((${parsed.code.replace(/[\s;]+$/, "")}\n))`
+        : parsed.code;
       scriptPath = "-c";
     } else if (parsed.scriptFile !== null) {
       const filePath = ctx.fs.resolvePath(ctx.cwd, parsed.scriptFile);
@@ -155,7 +186,7 @@ export const jsExecCommand: RuntimeCommand = {
       return {
         exitCode: 2,
         stderr:
-          "js-exec: no input provided (use -c CODE or provide a script file)\n",
+          "js-exec: no input provided (use -c CODE, -e CODE, or provide a script file)\n",
         stdout: "",
       };
     }

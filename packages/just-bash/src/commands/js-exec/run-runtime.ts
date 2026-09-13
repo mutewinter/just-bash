@@ -10,13 +10,13 @@ import {
   RunTimeoutError,
 } from "run";
 import { combineAbortSignals } from "../../abort-signals.js";
-import type { DirentEntry, IFileSystem } from "../../fs/interface.js";
+import type { DirentEntry } from "../../fs/interface.js";
 import { joinPath } from "../../fs/path-utils.js";
 import {
   sanitizeErrorMessage,
   sanitizeHostErrorMessage,
 } from "../../fs/sanitize-error.js";
-import { traverseFileTree } from "../../fs/traversal.js";
+import { FileTraversalBudget, traverseFileTree } from "../../fs/traversal.js";
 import { mapToRecord } from "../../helpers/env.js";
 import { shellJoinArgs } from "../../helpers/shell-quote.js";
 import { getErrorMessage } from "../../interpreter/helpers/errors.js";
@@ -525,7 +525,7 @@ const guestSetupSource = (
     EISDIR: -21, ELOOP: -40, EMFILE: -24, ENAMETOOLONG: -36, ENOENT: -2,
     ENOSPC: -28, ENOTDIR: -20, ENOTEMPTY: -39, EPERM: -1, EROFS: -30, EXDEV: -18
   };
-  var ERRNO_MESSAGE = /^(E[A-Z0-9]+): (.*?)(?:, [a-z]+ '[^']*'(?: -> '[^']*')?)?$/;
+  var ERRNO_MESSAGE = /^(E[A-Z0-9]+): (.*?)(?:, [a-z]+ '.*')?$/;
   function fsError(message, syscall, path, dest) {
     var error = new Error(message);
     var match = ERRNO_MESSAGE.exec(message);
@@ -557,7 +557,10 @@ const guestSetupSource = (
     this.size = raw.size;
     this.blocks = Math.ceil(raw.size / 512);
     this.atimeMs = this.mtimeMs = this.ctimeMs = this.birthtimeMs = mtime.getTime();
-    this.atime = this.mtime = this.ctime = this.birthtime = mtime;
+    this.atime = new Date(mtime);
+    this.mtime = mtime;
+    this.ctime = new Date(mtime);
+    this.birthtime = new Date(mtime);
     Object.defineProperty(this, '_kind', { value: raw });
   }
   Stats.prototype.isFile = function() { return this._kind.isFile === true; };
@@ -635,8 +638,8 @@ const guestSetupSource = (
       catch (error) { return Promise.reject(error); }
     };
   })(names[i]);
-  fs.promises.unlink = fs.promises.rm;
-  fs.promises.rmdir = fs.promises.rm;
+  fs.promises.unlink = function() { try { return Promise.resolve(fs.unlinkSync.apply(fs, arguments)); } catch (error) { return Promise.reject(error); } };
+  fs.promises.rmdir = function() { try { return Promise.resolve(fs.rmdirSync.apply(fs, arguments)); } catch (error) { return Promise.reject(error); } };
   fs.promises.access = function(path) { return fs.existsSync(path) ? Promise.resolve() : Promise.reject(fsError('ENOENT: no such file or directory', 'access', path)); };
   globalThis.fs = fs;
 
@@ -777,17 +780,30 @@ interface TypedDirent extends DirentEntry {
   dir: string;
 }
 
-/** One listing with types, from the filesystem's own when it offers it. */
+/**
+ * One listing with types, from the filesystem's own when it offers it and
+ * from one lstat per entry otherwise, the latter under the traversal budget
+ * so a large directory cannot outrun the limits inside a single bridge call.
+ */
 const readdirWithTypes = async (
-  fs: IFileSystem,
+  ctx: RuntimeCommandContext,
   path: string,
 ): Promise<DirentEntry[]> => {
-  if (fs.readdirWithFileTypes !== undefined) {
-    return await fs.readdirWithFileTypes(path);
+  if (ctx.fs.readdirWithFileTypes !== undefined) {
+    return await ctx.fs.readdirWithFileTypes(path);
   }
+  const budget = new FileTraversalBudget({
+    executionScope: ctx.executionScope,
+    limits: ctx.limits,
+    signal: ctx.signal,
+    site: "js-exec",
+  });
+  const names = await ctx.fs.readdir(path);
+  budget.discover(names.length);
   const entries: DirentEntry[] = [];
-  for (const name of await fs.readdir(path)) {
-    const stat = await fs.lstat(joinPath(path, name));
+  for (const name of names) {
+    budget.checkpoint();
+    const stat = await ctx.fs.lstat(joinPath(path, name));
     entries.push({
       isDirectory: stat.isDirectory,
       isFile: stat.isFile,
@@ -1058,17 +1074,22 @@ async function executeWithRunInner(
               const resolved = resolve(path);
               if (!withTypes) return await ctx.fs.readdir(resolved);
               if (!recursive) {
-                return (await readdirWithTypes(ctx.fs, resolved)).map(
-                  (entry) => ({ ...entry, dir: "" }),
-                );
+                return (await readdirWithTypes(ctx, resolved)).map((entry) => ({
+                  ...entry,
+                  dir: "",
+                }));
               }
+              // The listed directory is followed if it is a symlink, as
+              // node follows it; symlinks met below it are listed and not
+              // entered.
+              const root = await ctx.fs.realpath(resolved);
               const entries: TypedDirent[] = [];
               await traverseFileTree(
                 {
                   executionScope: ctx.executionScope,
                   fs: ctx.fs,
                   limits: ctx.limits,
-                  root: resolved,
+                  root,
                   signal: ctx.signal,
                   site: "js-exec",
                   symlinks: "never",
@@ -1079,11 +1100,9 @@ async function executeWithRunInner(
                   const parent = entry.path.slice(0, separator);
                   entries.push({
                     dir:
-                      parent === resolved
+                      parent === root
                         ? ""
-                        : parent.slice(
-                            resolved === "/" ? 1 : resolved.length + 1,
-                          ),
+                        : parent.slice(root === "/" ? 1 : root.length + 1),
                     isDirectory: entry.stat.isDirectory,
                     isFile: entry.stat.isFile,
                     isSymbolicLink: entry.isSymlink,
@@ -1414,7 +1433,7 @@ ${bootstrap}
       // guest's.
       const isGuestError =
         RunError.isInstance(error) &&
-        (error.code === "RUN_ERROR" || !error.code.startsWith("RUN_"));
+        (error.code === "RUN_ERROR" || !String(error.code).startsWith("RUN_"));
       const guestMessage = isGuestError
         ? formatGuestError(error, options, sourceLineOffset)
         : sanitizeHostErrorMessage(message);

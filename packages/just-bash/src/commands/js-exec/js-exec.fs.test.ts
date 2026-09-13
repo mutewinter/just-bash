@@ -116,7 +116,7 @@ describe("js-exec fs operations", () => {
         files: { "/home/user/file.txt": "12345" },
       });
       const result = await env.exec(
-        `js-exec -c "const s = fs.statSync('/home/user/file.txt'); console.log(s instanceof fs.Stats, s.mtime instanceof Date, s.mtime.getTime() === s.mtimeMs, s.birthtime instanceof Date, s.isSymbolicLink(), s.isFIFO(), Object.keys(s).includes('_kind'))"`,
+        `js-exec -c "const s = fs.statSync('/home/user/file.txt'); s.atime.setTime(0); console.log(s instanceof fs.Stats, s.mtime instanceof Date, s.mtime.getTime() === s.mtimeMs, s.birthtime instanceof Date, s.isSymbolicLink(), s.isFIFO(), Object.keys(s).includes('_kind'))"`,
       );
       expect(result.stdout).toBe("true true true true false false false\n");
       expect(result.exitCode).toBe(0);
@@ -184,6 +184,23 @@ describe("js-exec fs operations", () => {
       expect(dirents.exitCode).toBe(0);
     });
 
+    it("should follow a symlinked root and list, not enter, a symlink below it", async () => {
+      const env = new Bash({
+        javascript: true,
+        files: {
+          "/home/user/real/a.txt": "a",
+          "/home/user/real/sub/b.txt": "b",
+        },
+      });
+      const result = await env.exec(
+        `js-exec -c "fs.symlinkSync('/home/user/real', '/home/user/link'); fs.symlinkSync('/home/user/real/sub', '/home/user/real/again'); console.log(JSON.stringify(fs.readdirSync('/home/user/link', { recursive: true })), JSON.stringify(fs.readdirSync('/home/user/real', { recursive: true, withFileTypes: true }).filter((e) => e.isSymbolicLink()).map((e) => e.name)))"`,
+      );
+      expect(result.stdout).toBe(
+        '["a.txt","again","sub","sub/b.txt"] ["again"]\n',
+      );
+      expect(result.exitCode).toBe(0);
+    });
+
     it("should keep the path as given in a Dirent's parentPath", async () => {
       const env = new Bash({
         javascript: true,
@@ -218,6 +235,39 @@ describe("js-exec fs operations", () => {
         "ENOENT rename /home/user/a.txt /home/user/b.txt\nENOENT: no such file or directory, rename '/home/user/a.txt' -> '/home/user/b.txt'\n",
       );
       expect(result.exitCode).toBe(0);
+    });
+
+    it("should name unlink and rmdir as their own syscalls, promised too", async () => {
+      const env = new Bash({ javascript: true });
+      const result = await env.exec(
+        `js-exec -m -c "const codes = []; try { fs.unlinkSync('/nope') } catch (e) { codes.push(e.syscall) } try { await fs.promises.unlink('/nope') } catch (e) { codes.push(e.syscall) } try { await fs.promises.rmdir('/nope') } catch (e) { codes.push(e.syscall) } console.log(codes.join(' '))"`,
+      );
+      expect(result.stdout).toBe("unlink unlink rmdir\n");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should keep an apostrophe in the path out of the reason", async () => {
+      const env = new Bash({
+        javascript: true,
+        files: {
+          "/home/user/apostrophe.js":
+            'try { fs.readFileSync("/home/user/don\'t.txt") } catch (e) { console.log(e.code, e.path); console.log(e.message) }\n',
+        },
+      });
+      const result = await env.exec("js-exec /home/user/apostrophe.js");
+      expect(result.stdout).toBe(
+        "ENOENT /home/user/don't.txt\nENOENT: no such file or directory, open '/home/user/don't.txt'\n",
+      );
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should still report a guest error whose code is not a string", async () => {
+      const env = new Bash({ javascript: true });
+      const result = await env.exec(
+        `js-exec -c "const e = new Error('boom'); e.code = 7; throw e"`,
+      );
+      expect(result.stderr).toBe("at <eval> (-c:1:20): boom\n");
+      expect(result.exitCode).toBe(1);
     });
 
     it("should reject fs.promises.access with the same shape", async () => {

@@ -141,6 +141,41 @@ describe("js-exec", () => {
       expect(result.exitCode).toBe(0);
     });
 
+    it.each([
+      ["a trailing line comment", `js-exec -p "1 + 2; // three"`, "3\n"],
+      ["a trailing block comment", `js-exec -p "1 + 2 /* three */;"`, "3\n"],
+      ["a // inside a string", `js-exec -p "'http://x' // url"`, "http://x\n"],
+      ["an empty program", `js-exec -p ""`, "undefined\n"],
+      ["a semicolon alone", `js-exec -p ";"`, "undefined\n"],
+      ["a regular expression", `js-exec -p "/x/g"`, "/x/g\n"],
+      ["a symbol", `js-exec -p "Symbol('x')"`, "Symbol(x)\n"],
+      ["a bigint", `js-exec -p "10n"`, "10n\n"],
+      ["a named function", `js-exec -p "(function f() {})"`, "[Function: f]\n"],
+      ["an arrow function", `js-exec -p "() => 1"`, "[Function (anonymous)]\n"],
+      ["a date", `js-exec -p "new Date(0)"`, "1970-01-01T00:00:00.000Z\n"],
+      [
+        "null and NaN",
+        `js-exec -p "[null, NaN].map(String)"`,
+        '["null","NaN"]\n',
+      ],
+      ["an object", `js-exec -p "({ a: [1, 2] })"`, '{"a":[1,2]}\n'],
+    ])("should print %s with -p", async (_name, command, stdout) => {
+      const env = new Bash({ javascript: true });
+      const result = await env.exec(command);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe(stdout);
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should report an error in -p code on line 1, past the wrapper's opening", async () => {
+      const env = new Bash({ javascript: true });
+      const result = await env.exec(`js-exec -p "nope.x"`);
+      expect(result.stderr).toBe(
+        "at <eval> (-c:1:12): 'nope' is not defined\n",
+      );
+      expect(result.exitCode).toBe(1);
+    });
+
     it("should print with --print and pass the arguments through", async () => {
       const env = new Bash({ javascript: true });
       const result = await env.exec(

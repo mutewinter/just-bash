@@ -818,8 +818,9 @@ async function executeWithRunInner(
   };
   const env = mapToRecord(ctx.env);
   // Node's shape: the executable, then the script for a file (nothing for
-  // inline code, as with `node -e`), then the arguments, so that
-  // `process.argv.slice(2)` is the script's arguments either way.
+  // inline code, as with `node -e`), then the arguments, so a file reads its
+  // arguments with `process.argv.slice(2)` and inline code with `slice(1)`,
+  // as under node.
   const argv = [
     "js-exec",
     ...(options.scriptPath === "-c" ? [] : [options.scriptPath]),

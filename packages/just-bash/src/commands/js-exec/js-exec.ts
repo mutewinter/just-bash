@@ -138,6 +138,77 @@ function parseArgs(args: string[]): ParsedArgs | ExecResult {
   return result;
 }
 
+/**
+ * Whether every quote in `code` is closed, so that a `//` or a `/*` at its
+ * end is a comment rather than the inside of a string.
+ */
+function quotesBalanced(code: string): boolean {
+  let open: string | undefined;
+  for (let index = 0; index < code.length; index++) {
+    const char = code[index];
+    if (open === undefined) {
+      if (char === "'" || char === '"' || char === "`") open = char;
+    } else if (char === "\\") {
+      index++;
+    } else if (char === open) {
+      open = undefined;
+    }
+  }
+  return open === undefined;
+}
+
+/**
+ * The program without the trailing semicolons and comments that end a typed
+ * expression (`1; // two`), so it can sit in an expression position.
+ */
+function trailingExpression(code: string): string {
+  let expression = code;
+  for (;;) {
+    const trimmed = expression.trimEnd();
+    let next = trimmed;
+    if (trimmed.endsWith(";")) {
+      next = trimmed.slice(0, -1);
+    } else if (trimmed.endsWith("*/")) {
+      const start = trimmed.lastIndexOf("/*");
+      if (start !== -1 && quotesBalanced(trimmed.slice(0, start))) {
+        next = trimmed.slice(0, start);
+      }
+    } else {
+      let commentStart = trimmed.indexOf("//", trimmed.lastIndexOf("\n") + 1);
+      while (
+        commentStart !== -1 &&
+        !quotesBalanced(trimmed.slice(0, commentStart))
+      ) {
+        commentStart = trimmed.indexOf("//", commentStart + 2);
+      }
+      if (commentStart !== -1) next = trimmed.slice(0, commentStart);
+    }
+    if (next === expression) return expression;
+    expression = next;
+  }
+}
+
+/**
+ * How `-p` prints a value: strings as they are, and the rest the way node
+ * inspects them for the kinds `console.log`'s JSON would lose (a RegExp as
+ * `{}`, a Symbol or a function as nothing). Objects and arrays stay JSON,
+ * as they are everywhere in this runtime. A declaration, so it hoists above
+ * the expression and the expression keeps its place on line 1.
+ */
+const PRINT_VALUE = `function __jbPrint(v) { console.log(typeof v === 'string' ? v : typeof v === 'symbol' ? v.toString() : typeof v === 'bigint' ? v + 'n' : typeof v === 'function' ? (v.name ? '[Function: ' + v.name + ']' : '[Function (anonymous)]') : v instanceof RegExp ? String(v) : v instanceof Date ? v.toISOString() : v instanceof Error ? String(v) + (v.stack ? '\\n' + v.stack : '') : v === undefined || v === null || typeof v === 'number' || typeof v === 'boolean' ? String(v) : (function () { try { return JSON.stringify(v); } catch (_) { return String(v); } })()); }`;
+
+/**
+ * `-p` prints the value of one expression, which is what node prints for a
+ * single expression statement; an empty program prints `undefined`, as
+ * node does. A program of several statements is a syntax error here. The
+ * newline after the expression keeps a comment inside it from swallowing
+ * the closing parenthesis.
+ */
+function printSource(code: string): string {
+  const expression = trailingExpression(code);
+  return `__jbPrint((${expression === "" ? "undefined" : expression}\n));\n${PRINT_VALUE}`;
+}
+
 export const jsExecCommand: RuntimeCommand = {
   name: "js-exec",
   async execute(args, ctx) {
@@ -153,12 +224,7 @@ export const jsExecCommand: RuntimeCommand = {
     let source: string;
     let scriptPath: string;
     if (parsed.code !== null) {
-      // `-p` prints the value of one expression, which is what node prints
-      // for a single expression statement. The newline keeps a trailing line
-      // comment from swallowing the closing parenthesis.
-      source = parsed.print
-        ? `console.log((${parsed.code.replace(/[\s;]+$/, "")}\n))`
-        : parsed.code;
+      source = parsed.print ? printSource(parsed.code) : parsed.code;
       scriptPath = "-c";
     } else if (parsed.scriptFile !== null) {
       const filePath = ctx.fs.resolvePath(ctx.cwd, parsed.scriptFile);

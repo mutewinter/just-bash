@@ -330,6 +330,7 @@ export async function executeUserScript(
   scriptPath: string,
   args: string[],
   stdin: string,
+  stdinOwned: boolean,
   executeScript: ExecuteScriptFn,
 ): Promise<ExecResult> {
   // Read the script content
@@ -356,7 +357,9 @@ export async function executeUserScript(
   ctx.state.parentHasLoopContext = parentLoopDepth > 0;
   ctx.state.loopDepth = 0;
   ctx.state.bashPid = ctx.state.nextVirtualPid++;
-  if (stdin) {
+  // The script's commands read the stream the caller handed it, which an
+  // empty pipe or an empty-file redirection hands over as no bytes at all.
+  if (stdinOwned || stdin) {
     ctx.state.groupStdin = stdin;
   }
   ctx.state.currentSource = scriptPath;

@@ -422,9 +422,15 @@ export class Interpreter {
     scriptPath: string,
     args: string[],
     stdin = "",
+    stdinOwned = false,
   ): Promise<ExecResult> {
-    return executeUserScriptHelper(this.ctx, scriptPath, args, stdin, (ast) =>
-      this.executeScript(ast),
+    return executeUserScriptHelper(
+      this.ctx,
+      scriptPath,
+      args,
+      stdin,
+      stdinOwned,
+      (ast) => this.executeScript(ast),
     );
   }
 
@@ -582,17 +588,17 @@ export class Interpreter {
       case "SimpleCommand":
         return this.executeSimpleCommand(node, stdin, stdinOwned);
       case "If":
-        return executeIf(this.ctx, node);
+        return executeIf(this.ctx, node, stdin, stdinOwned);
       case "For":
-        return executeFor(this.ctx, node);
+        return executeFor(this.ctx, node, stdin, stdinOwned);
       case "CStyleFor":
-        return executeCStyleFor(this.ctx, node);
+        return executeCStyleFor(this.ctx, node, stdin, stdinOwned);
       case "While":
-        return executeWhile(this.ctx, node, stdin);
+        return executeWhile(this.ctx, node, stdin, stdinOwned);
       case "Until":
-        return executeUntil(this.ctx, node, stdin);
+        return executeUntil(this.ctx, node, stdin, stdinOwned);
       case "Case":
-        return executeCase(this.ctx, node);
+        return executeCase(this.ctx, node, stdin, stdinOwned);
       case "Subshell":
         return this.executeSubshell(node, stdin, stdinOwned);
       case "Group":
@@ -886,10 +892,21 @@ export class Interpreter {
       return preparedRedirectionError(preparedRedirections);
     }
     const stdinSourceFd = preparedRedirections.stdinSourceFd;
-    // The command owns fd 0 when a redirection gave it one here, or when the
-    // pipeline it sits in did.
+    // Two things a command can be told about fd 0. It owns the descriptor when
+    // a redirection gave it one here or the pipeline it sits in did, which
+    // decides whether eval, a function, or `command` read their own stream or
+    // the enclosing one; `0<&-` counts, since a closed fd 0 is still not the
+    // shell's. It is connected when something is on the other end: a
+    // redirection or a pipe that this command carries, or, for an fd 0 no
+    // redirection touched (`<&0` included), the pipe, enclosing stream, or
+    // bytes the command inherited. A closed fd 0 is connected to nothing.
     const stdinRedirected =
       stdinOwned || preparedRedirections.stdin !== undefined;
+    const fd0 = preparedRedirections.standardRoutes.get(0);
+    const stdinConnected =
+      fd0 === undefined || (fd0.kind === "dup-in" && fd0.sourceFd === 0)
+        ? stdinOwned || stdin !== "" || this.ctx.state.groupStdin !== undefined
+        : fd0.kind !== "closed";
     if (preparedRedirections.stdin !== undefined) {
       stdin = preparedRedirections.stdin;
     }
@@ -969,6 +986,7 @@ export class Interpreter {
         false,
         stdinSourceFd,
         stdinRedirected,
+        stdinConnected,
       );
     } catch (error) {
       // For break/continue, we still need to apply redirections before propagating
@@ -1096,13 +1114,15 @@ export class Interpreter {
     useDefaultPath = false,
     stdinSourceFd = -1,
     stdinRedirected = false,
+    stdinConnected = false,
   ): Promise<ExecResult> {
     const dispatchCtx: BuiltinDispatchContext = {
       ctx: this.ctx,
-      runCommand: (name, a, qa, s, sf, udp, ssf, sr) =>
-        this.runCommand(name, a, qa, s, sf, udp, ssf, sr),
+      runCommand: (name, a, qa, s, sf, udp, ssf, sr, sc) =>
+        this.runCommand(name, a, qa, s, sf, udp, ssf, sr, sc),
       buildExportedEnv: () => this.buildExportedEnv(),
-      executeUserScript: (path, a, s) => this.executeUserScript(path, a, s),
+      executeUserScript: (path, a, s, so) =>
+        this.executeUserScript(path, a, s, so),
     };
 
     // Try builtin dispatch first
@@ -1116,6 +1136,7 @@ export class Interpreter {
       useDefaultPath,
       stdinSourceFd,
       stdinRedirected,
+      stdinConnected,
     );
 
     if (builtinResult !== null)
@@ -1131,6 +1152,7 @@ export class Interpreter {
       stdin,
       useDefaultPath,
       stdinRedirected,
+      stdinConnected,
     );
     return { ...externalResult, internalProducerCommand: commandName };
   }

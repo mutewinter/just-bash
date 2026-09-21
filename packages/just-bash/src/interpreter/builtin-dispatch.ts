@@ -92,6 +92,7 @@ export type RunCommandFn = (
   useDefaultPath?: boolean,
   stdinSourceFd?: number,
   stdinRedirected?: boolean,
+  stdinConnected?: boolean,
 ) => Promise<ExecResult>;
 
 interface RevocableCommandContext {
@@ -424,6 +425,7 @@ export type ExecuteUserScriptFn = (
   scriptPath: string,
   args: string[],
   stdin?: string,
+  stdinOwned?: boolean,
 ) => Promise<ExecResult>;
 
 /**
@@ -456,6 +458,13 @@ export async function dispatchBuiltin(
    * EOF rather than "inherit the shell's stdin".
    */
   stdinRedirected = false,
+  /**
+   * True when something is on the other end of fd 0. Differs from
+   * `stdinRedirected` in both directions: an inherited fd 0 is connected when
+   * the enclosing scope has a stream, and `cmd 0<&-` owns a closed fd 0 that
+   * is connected to nothing. Handed to the command the builtins wrap.
+   */
+  stdinConnected = false,
 ): Promise<ExecResult | null> {
   const { ctx, runCommand } = dispatchCtx;
 
@@ -586,10 +595,22 @@ export async function dispatchBuiltin(
     return handleLet(ctx, args);
   }
   if (commandName === "command") {
-    return handleCommandBuiltin(dispatchCtx, args, stdin, stdinRedirected);
+    return handleCommandBuiltin(
+      dispatchCtx,
+      args,
+      stdin,
+      stdinRedirected,
+      stdinConnected,
+    );
   }
   if (commandName === "builtin") {
-    return handleBuiltinBuiltin(dispatchCtx, args, stdin, stdinRedirected);
+    return handleBuiltinBuiltin(
+      dispatchCtx,
+      args,
+      stdin,
+      stdinRedirected,
+      stdinConnected,
+    );
   }
   if (commandName === "shopt") {
     return handleShopt(ctx, args);
@@ -611,6 +632,7 @@ export async function dispatchBuiltin(
       false,
       -1,
       stdinRedirected,
+      stdinConnected,
     );
     return { ...result, internalProducerOmitsShellPrefix: true };
   }
@@ -658,6 +680,7 @@ async function handleCommandBuiltin(
   stdin: string,
   /** Forwarded to the wrapped command: it runs on this command's fd 0. */
   stdinRedirected = false,
+  stdinConnected = false,
 ): Promise<ExecResult> {
   const { ctx, runCommand } = dispatchCtx;
 
@@ -711,6 +734,7 @@ async function handleCommandBuiltin(
     useDefaultPath,
     -1,
     stdinRedirected,
+    stdinConnected,
   );
 }
 
@@ -723,6 +747,7 @@ async function handleBuiltinBuiltin(
   stdin: string,
   /** Forwarded to the wrapped builtin: it runs on this command's fd 0. */
   stdinRedirected = false,
+  stdinConnected = false,
 ): Promise<ExecResult> {
   const { runCommand } = dispatchCtx;
 
@@ -746,7 +771,17 @@ async function handleBuiltinBuiltin(
   }
   const [, ...rest] = cmdArgs;
   // Run as builtin (recursive call, skip function lookup)
-  return runCommand(cmd, rest, [], stdin, true, false, -1, stdinRedirected);
+  return runCommand(
+    cmd,
+    rest,
+    [],
+    stdin,
+    true,
+    false,
+    -1,
+    stdinRedirected,
+    stdinConnected,
+  );
 }
 
 /**
@@ -761,6 +796,7 @@ export async function executeExternalCommand(
   useDefaultPath: boolean,
   /** See `dispatchBuiltin`. */
   stdinOwned = false,
+  stdinConnected = false,
 ): Promise<ExecResult> {
   const { ctx, buildExportedEnv, executeUserScript } = dispatchCtx;
 
@@ -800,7 +836,7 @@ export async function executeExternalCommand(
       }
       ctx.state.hashTable.set(commandName, resolved.path);
     }
-    return await executeUserScript(resolved.path, args, stdin);
+    return await executeUserScript(resolved.path, args, stdin, stdinOwned);
   }
   const { cmd, path: cmdPath } = resolved;
   // Add to hash table for PATH caching (only for non-path commands)
@@ -894,21 +930,25 @@ export async function executeExternalCommand(
     // a redirection from an empty file, or an enclosing group's stdin all
     // arrive as no bytes, and a command that reads stdin only when it has one
     // (ripgrep, which otherwise walks the directory) needs the distinction.
-    stdinConnected:
-      stdinOwned || stdin !== "" || ctx.state.groupStdin !== undefined,
+    stdinConnected,
     limits: ctx.limits,
     executionScope: cmd.internalIsExtension
       ? createCommandExecutionBudget(ctx.executionScope)
       : ctx.executionScope,
     exec: (script, options) => ctx.execFn(script, options, false),
+    // The nested shell gets this command's stdin only when fd 0 is connected:
+    // handing it an empty buffer otherwise would give every command in it a
+    // stream to report, where a bare `bash -c cmd` has none to hand on.
     execWithInheritedStdin: (script, options) =>
       ctx.execFn(
         script,
-        {
-          ...options,
-          stdin: latin1FromBytes(effectiveStdin),
-          stdinKind: "bytes",
-        },
+        stdinConnected
+          ? {
+              ...options,
+              stdin: latin1FromBytes(effectiveStdin),
+              stdinKind: "bytes",
+            }
+          : options,
         true,
       ),
     fetch: ctx.fetch,

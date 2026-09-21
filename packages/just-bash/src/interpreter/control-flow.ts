@@ -45,38 +45,47 @@ import { executeCondition } from "./helpers/condition.js";
 import { getErrorMessage } from "./helpers/errors.js";
 import { handleLoopError } from "./helpers/loop.js";
 import { failure, throwExecutionLimit } from "./helpers/result.js";
-import {
-  type PreparedRedirections,
-  withPreparedRedirections,
-} from "./redirections.js";
+import { withPreparedRedirections } from "./redirections.js";
 import type { InterpreterContext } from "./types.js";
 
 /**
- * Decide whether a loop takes ownership of the shared read stream
- * (`ctx.state.groupStdin`).
+ * Run a compound command's body on the stdin it owns, if it owns one.
  *
- * A loop only installs — and therefore only restores — a stdin it brought
- * itself: its own input redirection (`< file`, here-doc, here-string), or the
- * stdin handed to it as a pipeline stage. A stream merely INHERITED from an
- * enclosing group or loop must be left in place, because reads inside the body
- * advance it and restoring it afterwards would rewind the shared read
- * position: `printf 'a\nb\n' | { while read x; do break; done; read y; }` has
- * to see `y=b`, not `y=a`.
+ * A compound command only installs — and therefore only restores — a stdin
+ * (`ctx.state.groupStdin`) it brought itself: its own input redirection
+ * (`< file`, here-doc, here-string), or the stdin handed to it as a pipeline
+ * stage. A stream merely INHERITED from an enclosing group or loop must be
+ * left in place, because reads inside the body advance it and restoring it
+ * afterwards would rewind the shared read position:
+ * `printf 'a\nb\n' | { while read x; do break; done; read y; }` has to see
+ * `y=b`, not `y=a`.
  *
- * `ownStdin` of `""` still counts as ownership — `done < empty-file` gives the
- * body an empty stream rather than the enclosing one.
+ * Empty content still counts as ownership — `done < empty-file` gives the body
+ * an empty stream rather than the enclosing one, and so does a pipeline stage
+ * whose producer printed nothing, which is why the pipeline says whether it
+ * handed one over (`pipelineOwned`) rather than leaving the bytes to tell.
  */
-function resolveLoopStdin(
+async function withCompoundStdin(
+  ctx: InterpreterContext,
   ownStdin: string | undefined,
   pipelineStdin: string,
-): { owns: true; stdin: string } | { owns: false } {
-  if (ownStdin !== undefined) {
-    return { owns: true, stdin: ownStdin };
+  pipelineOwned: boolean,
+  run: () => Promise<ExecResult>,
+): Promise<ExecResult> {
+  const owned =
+    ownStdin !== undefined
+      ? ownStdin
+      : pipelineOwned || pipelineStdin !== ""
+        ? pipelineStdin
+        : undefined;
+  if (owned === undefined) return run();
+  const savedGroupStdin = ctx.state.groupStdin;
+  ctx.state.groupStdin = owned;
+  try {
+    return await run();
+  } finally {
+    ctx.state.groupStdin = savedGroupStdin;
   }
-  if (pipelineStdin !== "") {
-    return { owns: true, stdin: pipelineStdin };
-  }
-  return { owns: false };
 }
 
 class CompoundOutput {
@@ -169,9 +178,13 @@ async function executeBoundedStatements(
 export async function executeIf(
   ctx: InterpreterContext,
   node: IfNode,
+  stdin = "",
+  stdinOwned = false,
 ): Promise<ExecResult> {
-  return withPreparedRedirections(ctx, node.redirections, "", () =>
-    executeIfBody(ctx, node),
+  return withPreparedRedirections(ctx, node.redirections, stdin, (prepared) =>
+    withCompoundStdin(ctx, prepared.stdin, stdin, stdinOwned, () =>
+      executeIfBody(ctx, node),
+    ),
   );
 }
 
@@ -201,9 +214,13 @@ async function executeIfBody(
 export async function executeFor(
   ctx: InterpreterContext,
   node: ForNode,
+  stdin = "",
+  stdinOwned = false,
 ): Promise<ExecResult> {
-  return withPreparedRedirections(ctx, node.redirections, "", () =>
-    executeForBody(ctx, node),
+  return withPreparedRedirections(ctx, node.redirections, stdin, (prepared) =>
+    withCompoundStdin(ctx, prepared.stdin, stdin, stdinOwned, () =>
+      executeForBody(ctx, node),
+    ),
   );
 }
 
@@ -295,9 +312,13 @@ async function executeForBody(
 export async function executeCStyleFor(
   ctx: InterpreterContext,
   node: CStyleForNode,
+  stdin = "",
+  stdinOwned = false,
 ): Promise<ExecResult> {
-  return withPreparedRedirections(ctx, node.redirections, "", () =>
-    executeCStyleForBody(ctx, node),
+  return withPreparedRedirections(ctx, node.redirections, stdin, (prepared) =>
+    withCompoundStdin(ctx, prepared.stdin, stdin, stdinOwned, () =>
+      executeCStyleForBody(ctx, node),
+    ),
   );
 }
 
@@ -387,28 +408,22 @@ export async function executeWhile(
   ctx: InterpreterContext,
   node: WhileNode,
   stdin = "",
+  stdinOwned = false,
 ): Promise<ExecResult> {
   return withPreparedRedirections(ctx, node.redirections, stdin, (prepared) =>
-    executeWhileBody(ctx, node, stdin, prepared),
+    withCompoundStdin(ctx, prepared.stdin, stdin, stdinOwned, () =>
+      executeWhileBody(ctx, node),
+    ),
   );
 }
 
 async function executeWhileBody(
   ctx: InterpreterContext,
   node: WhileNode,
-  stdin: string,
-  prepared: PreparedRedirections,
 ): Promise<ExecResult> {
   const output = new CompoundOutput(ctx);
   let exitCode = 0;
   let iterations = 0;
-
-  // Install groupStdin only for a stream this loop owns (see resolveLoopStdin)
-  const loopStdin = resolveLoopStdin(prepared.stdin, stdin);
-  const savedGroupStdin = ctx.state.groupStdin;
-  if (loopStdin.owns) {
-    ctx.state.groupStdin = loopStdin.stdin;
-  }
 
   ctx.state.loopDepth++;
   try {
@@ -494,9 +509,6 @@ async function executeWhileBody(
     }
   } finally {
     ctx.state.loopDepth--;
-    if (loopStdin.owns) {
-      ctx.state.groupStdin = savedGroupStdin;
-    }
   }
 
   return output.build(exitCode);
@@ -506,28 +518,22 @@ export async function executeUntil(
   ctx: InterpreterContext,
   node: UntilNode,
   stdin = "",
+  stdinOwned = false,
 ): Promise<ExecResult> {
   return withPreparedRedirections(ctx, node.redirections, stdin, (prepared) =>
-    executeUntilBody(ctx, node, stdin, prepared),
+    withCompoundStdin(ctx, prepared.stdin, stdin, stdinOwned, () =>
+      executeUntilBody(ctx, node),
+    ),
   );
 }
 
 async function executeUntilBody(
   ctx: InterpreterContext,
   node: UntilNode,
-  stdin: string,
-  prepared: PreparedRedirections,
 ): Promise<ExecResult> {
   const output = new CompoundOutput(ctx);
   let exitCode = 0;
   let iterations = 0;
-
-  // Install groupStdin only for a stream this loop owns (see resolveLoopStdin)
-  const loopStdin = resolveLoopStdin(prepared.stdin, stdin);
-  const savedGroupStdin = ctx.state.groupStdin;
-  if (loopStdin.owns) {
-    ctx.state.groupStdin = loopStdin.stdin;
-  }
 
   ctx.state.loopDepth++;
   try {
@@ -572,9 +578,6 @@ async function executeUntilBody(
     }
   } finally {
     ctx.state.loopDepth--;
-    if (loopStdin.owns) {
-      ctx.state.groupStdin = savedGroupStdin;
-    }
   }
 
   return output.build(exitCode);
@@ -583,9 +586,13 @@ async function executeUntilBody(
 export async function executeCase(
   ctx: InterpreterContext,
   node: CaseNode,
+  stdin = "",
+  stdinOwned = false,
 ): Promise<ExecResult> {
-  return withPreparedRedirections(ctx, node.redirections, "", () =>
-    executeCaseBody(ctx, node),
+  return withPreparedRedirections(ctx, node.redirections, stdin, (prepared) =>
+    withCompoundStdin(ctx, prepared.stdin, stdin, stdinOwned, () =>
+      executeCaseBody(ctx, node),
+    ),
   );
 }
 

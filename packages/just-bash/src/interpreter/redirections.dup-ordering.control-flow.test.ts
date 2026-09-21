@@ -133,4 +133,27 @@ describe("fd duplication ordering through pipelines", () => {
     expect(result.stdout).toBe("O1\nO2\n");
     expect(result.stderr).toBe("E1\n");
   });
+
+  // A stage that leaves on `exit` or errexit becomes that stage's result
+  // rather than ending the script, and the result keeps the order the stage
+  // wrote in.
+  it.each([
+    ["exit", "{ echo O1; echo E1 1>&2; echo O2; exit; } |& cat"],
+    [
+      "exit with a status",
+      "{ echo O1; echo E1 1>&2; echo O2; exit 3; } |& cat",
+    ],
+    [
+      "errexit",
+      "set -e; { echo O1; echo E1 1>&2; echo O2; false; echo P; } |& cat",
+    ],
+    [
+      "exit into an ordinary pipe after a duplication",
+      "{ echo O1; echo E1 1>&2; echo O2; exit; } 2>&1 | cat",
+    ],
+  ])("keeps the order of a stage that leaves on %s", async (_, script) => {
+    const result = await new Bash().exec(script);
+    expect(result.stdout).toBe("O1\nE1\nO2\n");
+    expect(result.stderr).toBe("");
+  });
 });

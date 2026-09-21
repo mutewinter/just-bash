@@ -120,7 +120,19 @@ export type ExpandedRedirectTargets = Map<number, string>;
 
 type PreparedDupSource =
   | { kind: "standard"; fd: number }
-  | { kind: "entry"; entry: FdEntry; descriptors: number[] };
+  | {
+      kind: "entry";
+      entry: FdEntry;
+      descriptors: number[];
+      /**
+       * `entry` is an open this redirection list performed, so it is the
+       * open's identity: a dup resolving to a different object resolved to
+       * a different open, even through an fd number both held in turn.
+       * Absent for an open that predates the list, whose table entry is
+       * decoded afresh on every lookup and whose identity is its alias group.
+       */
+      opened?: boolean;
+    };
 
 export type PreparedDupSources = Map<number, PreparedDupSource>;
 
@@ -337,6 +349,17 @@ async function prepareRedirectionsWithState(
   const targets: ExpandedRedirectTargets = new Map();
   const dupSources: PreparedDupSources = new Map();
   const openedEntries: OpenedRedirectEntries = new Map();
+  // What each user fd this list opened or re-pointed holds, as the object
+  // the list created or copied, so a later dup of that fd in the same list
+  // resolves to the same identity rather than to a fresh decode of the
+  // table; and which of those objects are opens the list made itself, as
+  // opposed to copies of a descriptor that predates it.
+  const listEntries = new Map<number, FdEntry>();
+  const listOpened = new WeakSet<FdEntry>();
+  const openedHere = <T extends FdEntry>(entry: T): T => {
+    listOpened.add(entry);
+    return entry;
+  };
   const standardRoute = (fd: number, fallback: FdEntry): FdEntry =>
     ctx.state.closedStandardFds?.has(fd)
       ? { kind: "closed" }
@@ -435,10 +458,27 @@ async function prepareRedirectionsWithState(
             kind: "entry",
             entry,
             descriptors: getFdAliasMembers(ctx, sourceFd),
+            opened: listOpened.has(entry),
           }
         : { kind: "standard", fd: sourceFd };
     }
-    return getDupSource(ctx, sourceFd, input);
+    const listEntry = listEntries.get(sourceFd);
+    if (listEntry === undefined) return getDupSource(ctx, sourceFd, input);
+    const readable =
+      listEntry.kind === "input" ||
+      listEntry.kind === "readwrite" ||
+      listEntry.kind === "dup-in";
+    const writable =
+      listEntry.kind === "output" ||
+      listEntry.kind === "readwrite" ||
+      listEntry.kind === "dup-out";
+    if (input ? !readable : !writable) return null;
+    return {
+      kind: "entry",
+      entry: listEntry,
+      descriptors: getFdAliasMembers(ctx, sourceFd),
+      opened: listOpened.has(listEntry),
+    };
   };
 
   for (let index = 0; index < redirections.length; index++) {
@@ -593,7 +633,7 @@ async function prepareRedirectionsWithState(
           }
           const opened = await openOutputEntry(ctx, target, false, false);
           if (opened.error) return fail(opened.error, index);
-          entry = opened.entry;
+          entry = openedHere(opened.entry as FdEntry);
         } else {
           const source = getPreparedDupSource(
             parsed.sourceFd,
@@ -615,7 +655,7 @@ async function prepareRedirectionsWithState(
               kind: redir.operator === "<&" ? "dup-in" : "dup-out",
               sourceFd: source.fd,
             };
-          } else if (parsed.sourceFd < FIRST_USER_FD) {
+          } else {
             entry = source.entry;
           }
         }
@@ -634,9 +674,9 @@ async function prepareRedirectionsWithState(
           redir.operator === ">|",
         );
         if (opened.error) return fail(opened.error, index);
-        entry = opened.entry;
+        entry = openedHere(opened.entry as FdEntry);
       } else if (redir.operator === "<<<") {
-        entry = { kind: "input", content: `${target}\n` };
+        entry = openedHere({ kind: "input", content: `${target}\n` });
       } else if (redir.operator === "<" || redir.operator === "<>") {
         const opened = await readInputEntry(
           ctx,
@@ -644,7 +684,7 @@ async function prepareRedirectionsWithState(
           redir.operator === "<>",
         );
         if (opened.error) return fail(opened.error, index);
-        entry = opened.entry;
+        entry = openedHere(opened.entry as FdEntry);
       }
 
       if (duplicate && duplicate.sourceFd >= FIRST_USER_FD) {
@@ -661,9 +701,11 @@ async function prepareRedirectionsWithState(
             index,
           );
         }
+        if (duplicate.move) listEntries.delete(duplicate.sourceFd);
       } else if (entry) {
         setFdEntry(ctx, fd, entry);
       }
+      if (entry) listEntries.set(fd, entry);
       if (
         duplicate?.move &&
         duplicate.sourceFd !== fd &&
@@ -681,6 +723,7 @@ async function prepareRedirectionsWithState(
       if (isDup && target === "-") {
         rememberFd(ctx, snapshot, fd);
         closeFd(ctx, fd);
+        listEntries.delete(fd);
         continue;
       }
       const plannedDuplicate = isDup ? parseDupTarget(target) : null;
@@ -720,7 +763,9 @@ async function prepareRedirectionsWithState(
           }
           const opened = await openOutputEntry(ctx, target, false, false);
           if (opened.error) return fail(opened.error, index);
-          setFdEntry(ctx, fd, opened.entry as FdEntry);
+          const entry = openedHere(opened.entry as FdEntry);
+          setFdEntry(ctx, fd, entry);
+          listEntries.set(fd, entry);
           continue;
         }
         const source = getPreparedDupSource(
@@ -738,12 +783,15 @@ async function prepareRedirectionsWithState(
           );
         }
         if (source.kind === "standard") {
-          setFdEntry(ctx, fd, {
+          const entry: FdEntry = {
             kind: redir.operator === "<&" ? "dup-in" : "dup-out",
             sourceFd: source.fd,
-          });
+          };
+          setFdEntry(ctx, fd, entry);
+          listEntries.set(fd, entry);
         } else if (parsed.sourceFd < FIRST_USER_FD) {
           setFdEntry(ctx, fd, source.entry);
+          listEntries.set(fd, source.entry);
         } else if (
           !(parsed.move
             ? moveFd(ctx, fd, parsed.sourceFd)
@@ -757,6 +805,9 @@ async function prepareRedirectionsWithState(
             ),
             index,
           );
+        } else {
+          listEntries.set(fd, source.entry);
+          if (parsed.move) listEntries.delete(parsed.sourceFd);
         }
         if (
           parsed.move &&
@@ -779,9 +830,16 @@ async function prepareRedirectionsWithState(
           redir.operator === ">|",
         );
         if (opened.error) return fail(opened.error, index);
-        setFdEntry(ctx, fd, opened.entry as FdEntry);
+        const entry = openedHere(opened.entry as FdEntry);
+        setFdEntry(ctx, fd, entry);
+        listEntries.set(fd, entry);
       } else if (redir.operator === "<<<") {
-        setFdEntry(ctx, fd, { kind: "input", content: `${target}\n` });
+        const entry = openedHere<FdEntry>({
+          kind: "input",
+          content: `${target}\n`,
+        });
+        setFdEntry(ctx, fd, entry);
+        listEntries.set(fd, entry);
       } else if (redir.operator === "<" || redir.operator === "<>") {
         const opened = await readInputEntry(
           ctx,
@@ -789,7 +847,9 @@ async function prepareRedirectionsWithState(
           redir.operator === "<>",
         );
         if (opened.error) return fail(opened.error, index);
-        setFdEntry(ctx, fd, opened.entry as FdEntry);
+        const entry = openedHere(opened.entry as FdEntry);
+        setFdEntry(ctx, fd, entry);
+        listEntries.set(fd, entry);
       }
       continue;
     }
@@ -820,11 +880,12 @@ async function prepareRedirectionsWithState(
         }
         const opened = await openOutputEntry(ctx, target, false, false, false);
         if (opened.error) return fail(opened.error, index);
-        const entry = opened.entry as FdEntry;
+        const entry = openedHere(opened.entry as FdEntry);
         dupSources.set(index, {
           kind: "entry",
           entry,
           descriptors: [],
+          opened: true,
         });
         if (redir.fd == null) {
           persistStandard(1, entry);
@@ -939,7 +1000,7 @@ async function prepareRedirectionsWithState(
         false,
       );
       if (opened.error) return fail(opened.error, index);
-      const entry = opened.entry as FdEntry;
+      const entry = openedHere(opened.entry as FdEntry);
       openedEntries.set(index, entry);
       if (redir.operator === "&>" || redir.operator === "&>>") {
         persistStandard(1, entry);
@@ -969,7 +1030,7 @@ async function prepareRedirectionsWithState(
     } else if (redir.operator === "<>") {
       const opened = await readInputEntry(ctx, target, true);
       if (opened.error) return fail(opened.error, index);
-      const entry = opened.entry as FdEntry;
+      const entry = openedHere(opened.entry as FdEntry);
       persistStandard(effectiveFd, entry);
       if (effectiveFd === 0 && entry.kind === "readwrite") {
         stdin = entry.content;
@@ -1430,6 +1491,14 @@ export async function applyRedirections(
     // being exactly the set of fds on that open.
     const aliasesBehind = (sink: RedirectSink): number[] | undefined =>
       sink.kind === "descriptor" ? sink.source.descriptors : undefined;
+    // Whether the sink is an open this redirection list performed, rather
+    // than a descriptor that predates it.
+    const openedHere = (sink: RedirectSink): boolean =>
+      sink.kind === "file"
+        ? sink.entry !== undefined
+        : sink.kind === "descriptor"
+          ? sink.source.opened === true
+          : false;
     // Whether both fds ended up on one open descriptor, which is what makes a
     // duplication carry the two streams in the order they were written.
     //
@@ -1454,6 +1523,11 @@ export async function applyRedirections(
       if (fd1Entry !== undefined && fd1Entry === entryBehind(fd2Sink)) {
         return true;
       }
+      // An open this list made is its own identity, so a different object is
+      // a different open: `1>&3 3>b 2>&3` snapshots fd 3 twice, once on each
+      // open, and the two alias groups both list 3 without either dup being
+      // on the other's descriptor.
+      if (openedHere(fd1Sink) || openedHere(fd2Sink)) return false;
       const fd1Aliases = aliasesBehind(fd1Sink);
       const fd2Aliases = aliasesBehind(fd2Sink);
       return (

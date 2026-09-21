@@ -104,20 +104,23 @@ export async function executePipeline(
       // In a MULTI-command pipeline, each command runs in a subshell context
       // So exit/return/errexit only affect that segment, not the whole script
       // For single commands, let these errors propagate to terminate the script
-      else if (error instanceof ExitError && node.commands.length > 1) {
+      // Errexit inside a pipeline segment should only fail that segment
+      // The pipeline's exit code comes from the last command (or pipefail)
+      // The stage's result keeps the order its output was written in, so a
+      // `|&` or a `2>&1` on the pipeline still merges the two streams along
+      // it rather than falling back to stdout first.
+      else if (
+        (error instanceof ExitError || error instanceof ErrexitError) &&
+        node.commands.length > 1
+      ) {
         result = {
           stdout: error.stdout,
           stderr: error.stderr,
           exitCode: error.exitCode,
         };
-      } else if (error instanceof ErrexitError && node.commands.length > 1) {
-        // Errexit inside a pipeline segment should only fail that segment
-        // The pipeline's exit code comes from the last command (or pipefail)
-        result = {
-          stdout: error.stdout,
-          stderr: error.stderr,
-          exitCode: error.exitCode,
-        };
+        if (error.outputChunks?.length) {
+          result.internalOutputChunks = error.outputChunks;
+        }
       } else {
         // Restore environment before re-throwing
         if (savedEnv) {

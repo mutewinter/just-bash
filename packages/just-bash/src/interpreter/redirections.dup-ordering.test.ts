@@ -192,4 +192,53 @@ describe("fd duplication descriptor identity", () => {
     const f = await env.exec("cat /f");
     expect(f.stdout).toBe("O1\nE1\nO2\n");
   });
+
+  // An fd number reused within one redirection list names two opens in turn.
+  // A dup snapshots the open the fd held when it ran, so `1>&3 3>b 2>&3` puts
+  // the two streams on different files even though both snapshots list fd 3.
+  const body = "{ printf O; printf E 1>&2; }";
+  const files = async (env: Bash, ...paths: string[]) => {
+    const out: string[] = [];
+    for (const path of paths) out.push((await env.exec(`cat ${path}`)).stdout);
+    return out;
+  };
+
+  it("keeps a reopened fd's streams apart when the first open came from exec", async () => {
+    const env = new Bash();
+    await env.exec(`exec 3> /a; ${body} 1>&3 3> /b 2>&3`);
+    expect(await files(env, "/a", "/b")).toEqual(["O", "E"]);
+  });
+
+  it("keeps a reopened fd's streams apart when both opens are in the list", async () => {
+    const env = new Bash();
+    await env.exec(`${body} 3> /a 1>&3 3> /b 2>&3`);
+    expect(await files(env, "/a", "/b")).toEqual(["O", "E"]);
+  });
+
+  it("still merges through an alias that survives the reopen", async () => {
+    const env = new Bash();
+    // fd 4 stays on the first open, so `2>&4` joins `1>&3` there.
+    await env.exec(`exec 3> /a; exec 4>&3; ${body} 1>&3 3> /b 2>&4`);
+    expect(await files(env, "/a", "/b")).toEqual(["OE", ""]);
+  });
+
+  it("merges two dups that reach one exec'd open through a list dup", async () => {
+    const env = new Bash();
+    await env.exec(`exec 3> /a; ${body} 4>&3 1>&3 2>&4`);
+    expect(await files(env, "/a")).toEqual(["OE"]);
+  });
+
+  it("merges two dups that reach one list open through a list dup", async () => {
+    const env = new Bash();
+    await env.exec(`${body} 3> /a 1>&3 4>&3 2>&4`);
+    expect(await files(env, "/a")).toEqual(["OE"]);
+  });
+
+  it("follows a list dup taken before its source was reopened", async () => {
+    const env = new Bash();
+    // fd 4 copied the first open; fd 3 then moved to /b, so stdout lands
+    // there and stderr on /a.
+    await env.exec(`exec 3> /a; ${body} 4>&3 3> /b 1>&3 2>&4`);
+    expect(await files(env, "/a", "/b")).toEqual(["E", "O"]);
+  });
 });

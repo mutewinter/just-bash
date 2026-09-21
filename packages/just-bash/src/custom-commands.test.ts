@@ -361,6 +361,63 @@ describe("custom-commands", () => {
       expect(result.exitCode).toBe(0);
     });
 
+    describe("ctx.stdinConnected", () => {
+      // Prints one word per invocation: "pipe" when fd 0 is connected,
+      // "none" when it is not, so a script's stdout is the sequence of
+      // answers the command saw.
+      const probe = defineCommand("probe", async (_args, ctx) => ({
+        stdout: `${ctx.stdinConnected ? "pipe" : "none"}\n`,
+        stderr: "",
+        exitCode: 0,
+      }));
+      const run = (script: string) =>
+        new Bash({
+          customCommands: [probe],
+          files: { "/empty": "", "/full": "x\n" },
+        }).exec(script);
+
+      it("is false for a bare command", async () => {
+        expect((await run("probe")).stdout).toBe("none\n");
+      });
+
+      it("is true for a pipe that carried bytes", async () => {
+        expect((await run("echo hi | probe")).stdout).toBe("pipe\n");
+      });
+
+      it.each([
+        ["a producer that printed nothing", "printf '' | probe"],
+        ["a producer that failed", "false | probe"],
+        ["a middle stage of a pipeline", "printf '' | probe | cat"],
+        ["a redirection from an empty file", "probe < /empty"],
+        ["a pipe into a group", "printf '' | { probe; }"],
+        ["a pipe into a subshell", "printf '' | (probe)"],
+        ["a pipe into a function", "f() { probe; }; printf '' | f"],
+        ["an empty here-string", "probe <<< ''"],
+      ])("is true for %s, even with no bytes", async (_, script) => {
+        expect((await run(script)).stdout).toBe("pipe\n");
+      });
+
+      it("is false again once the pipeline is over", async () => {
+        expect((await run("printf '' | probe; probe")).stdout).toBe(
+          "pipe\nnone\n",
+        );
+      });
+
+      it("is false for the first stage, which inherits the shell's stdin", async () => {
+        expect((await run("probe | cat")).stdout).toBe("none\n");
+      });
+
+      it("follows the standalone context's stdin", () => {
+        const withStdin = createCommandContext({
+          fs: {} as never,
+          stdin: EMPTY_BYTES,
+        });
+        const without = createCommandContext({ fs: {} as never });
+        expect(withStdin.stdinConnected).toBe(true);
+        expect(without.stdinConnected).toBe(false);
+      });
+    });
+
     it("custom command can read files via ctx.fs", async () => {
       const reader = defineCommand("reader", async (args, ctx) => {
         const content = await ctx.fs.readFile(args[0]);

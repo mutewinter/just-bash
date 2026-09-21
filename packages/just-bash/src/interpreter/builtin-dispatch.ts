@@ -450,10 +450,10 @@ export async function dispatchBuiltin(
   _useDefaultPath: boolean,
   stdinSourceFd: number,
   /**
-   * True when a redirection gave this command its own fd 0. `stdin` alone
-   * cannot express it: `cmd < empty-file` and an unredirected command both
-   * arrive as `""`, but only the first means EOF rather than "inherit the
-   * shell's stdin".
+   * True when a redirection or a pipe gave this command its own fd 0.
+   * `stdin` alone cannot express it: `cmd < empty-file`, `false | cmd`, and
+   * an unredirected command all arrive as `""`, but only the first two mean
+   * EOF rather than "inherit the shell's stdin".
    */
   stdinRedirected = false,
 ): Promise<ExecResult | null> {
@@ -759,6 +759,8 @@ export async function executeExternalCommand(
   args: string[],
   stdin: string,
   useDefaultPath: boolean,
+  /** See `dispatchBuiltin`. */
+  stdinOwned = false,
 ): Promise<ExecResult> {
   const { ctx, buildExportedEnv, executeUserScript } = dispatchCtx;
 
@@ -887,6 +889,13 @@ export async function executeExternalCommand(
       stdinAccessed = true;
       return effectiveStdin;
     },
+    // Whether anything is on the other end of fd 0, which the bytes alone
+    // cannot say once they are empty: a pipe whose producer printed nothing,
+    // a redirection from an empty file, or an enclosing group's stdin all
+    // arrive as no bytes, and a command that reads stdin only when it has one
+    // (ripgrep, which otherwise walks the directory) needs the distinction.
+    stdinConnected:
+      stdinOwned || stdin !== "" || ctx.state.groupStdin !== undefined,
     limits: ctx.limits,
     executionScope: cmd.internalIsExtension
       ? createCommandExecutionBudget(ctx.executionScope)

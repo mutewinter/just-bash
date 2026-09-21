@@ -65,6 +65,24 @@ describe("duplication descriptor identity - Real Bash Comparison", () => {
     );
   });
 
+  it("an fd re-pointed at another exec'd open keeps the two dups' streams apart", async () => {
+    const env = await setupFiles(testDir, {});
+    await compareOutputs(
+      env,
+      testDir,
+      `exec 3>a; exec 4>b; ${BODY} 1>&3 3>&4 2>&3; ${SHOW}`,
+    );
+  });
+
+  it("an eval script that exits keeps its write order through a group's duplication", async () => {
+    const env = await setupFiles(testDir, {});
+    await compareOutputs(
+      env,
+      testDir,
+      "{ eval 'echo O1; echo E1 >&2; echo O2; exit'; } 2>&1",
+    );
+  });
+
   it("a stage that exits keeps its write order through a duplication into a pipe", async () => {
     const env = await setupFiles(testDir, {});
     await compareOutputs(

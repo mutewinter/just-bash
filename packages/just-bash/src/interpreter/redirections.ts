@@ -132,6 +132,13 @@ type PreparedDupSource =
        * decoded afresh on every lookup and whose identity is its alias group.
        */
       opened?: boolean;
+      /**
+       * How many times this redirection list had re-pointed each fd in
+       * `descriptors` when the snapshot was taken, so two snapshots that
+       * list one fd number agree on an open only if neither saw the fd
+       * re-pointed in between. Absent means none had been.
+       */
+      rebindings?: number[];
     };
 
 export type PreparedDupSources = Map<number, PreparedDupSource>;
@@ -360,6 +367,23 @@ async function prepareRedirectionsWithState(
     listOpened.add(entry);
     return entry;
   };
+  // How many times this list has re-pointed each fd, by opening, duplicating,
+  // moving, or closing it. A dup snapshots the alias group its source fd was
+  // in, as fd numbers; the count beside each number says which binding of it
+  // the snapshot saw.
+  const rebinds = new Map<number, number>();
+  const rebound = (fd: number | null): void => {
+    if (fd !== null) rebinds.set(fd, (rebinds.get(fd) ?? 0) + 1);
+  };
+  const snapshotAliases = (
+    fd: number,
+  ): { descriptors: number[]; rebindings: number[] } => {
+    const descriptors = getFdAliasMembers(ctx, fd);
+    return {
+      descriptors,
+      rebindings: descriptors.map((member) => rebinds.get(member) ?? 0),
+    };
+  };
   const standardRoute = (fd: number, fallback: FdEntry): FdEntry =>
     ctx.state.closedStandardFds?.has(fd)
       ? { kind: "closed" }
@@ -424,6 +448,7 @@ async function prepareRedirectionsWithState(
     );
   };
   const persistStandard = (fd: number | null, entry: FdEntry): void => {
+    rebound(fd);
     if (fd !== null && fd < FIRST_USER_FD) standardRoutes.set(fd, entry);
     if (
       transaction.policy === "persistent" &&
@@ -435,6 +460,7 @@ async function prepareRedirectionsWithState(
     }
   };
   const bindTemporaryStandard = (fd: number, entry: FdEntry): void => {
+    rebound(fd);
     standardRoutes.set(fd, entry);
     rememberFd(ctx, transaction.standardSnapshot, fd);
     if (!transaction.standardClosedSnapshot.has(fd)) {
@@ -457,13 +483,18 @@ async function prepareRedirectionsWithState(
         ? {
             kind: "entry",
             entry,
-            descriptors: getFdAliasMembers(ctx, sourceFd),
+            ...snapshotAliases(sourceFd),
             opened: listOpened.has(entry),
           }
         : { kind: "standard", fd: sourceFd };
     }
     const listEntry = listEntries.get(sourceFd);
-    if (listEntry === undefined) return getDupSource(ctx, sourceFd, input);
+    if (listEntry === undefined) {
+      const source = getDupSource(ctx, sourceFd, input);
+      return source?.kind === "entry"
+        ? { ...source, ...snapshotAliases(sourceFd) }
+        : source;
+    }
     const readable =
       listEntry.kind === "input" ||
       listEntry.kind === "readwrite" ||
@@ -476,7 +507,7 @@ async function prepareRedirectionsWithState(
     return {
       kind: "entry",
       entry: listEntry,
-      descriptors: getFdAliasMembers(ctx, sourceFd),
+      ...snapshotAliases(sourceFd),
       opened: listOpened.has(listEntry),
     };
   };
@@ -701,11 +732,17 @@ async function prepareRedirectionsWithState(
             index,
           );
         }
-        if (duplicate.move) listEntries.delete(duplicate.sourceFd);
+        if (duplicate.move) {
+          listEntries.delete(duplicate.sourceFd);
+          rebound(duplicate.sourceFd);
+        }
       } else if (entry) {
         setFdEntry(ctx, fd, entry);
       }
-      if (entry) listEntries.set(fd, entry);
+      if (entry) {
+        listEntries.set(fd, entry);
+        rebound(fd);
+      }
       if (
         duplicate?.move &&
         duplicate.sourceFd !== fd &&
@@ -724,6 +761,7 @@ async function prepareRedirectionsWithState(
         rememberFd(ctx, snapshot, fd);
         closeFd(ctx, fd);
         listEntries.delete(fd);
+        rebound(fd);
         continue;
       }
       const plannedDuplicate = isDup ? parseDupTarget(target) : null;
@@ -766,6 +804,7 @@ async function prepareRedirectionsWithState(
           const entry = openedHere(opened.entry as FdEntry);
           setFdEntry(ctx, fd, entry);
           listEntries.set(fd, entry);
+          rebound(fd);
           continue;
         }
         const source = getPreparedDupSource(
@@ -789,9 +828,11 @@ async function prepareRedirectionsWithState(
           };
           setFdEntry(ctx, fd, entry);
           listEntries.set(fd, entry);
+          rebound(fd);
         } else if (parsed.sourceFd < FIRST_USER_FD) {
           setFdEntry(ctx, fd, source.entry);
           listEntries.set(fd, source.entry);
+          rebound(fd);
         } else if (
           !(parsed.move
             ? moveFd(ctx, fd, parsed.sourceFd)
@@ -807,7 +848,11 @@ async function prepareRedirectionsWithState(
           );
         } else {
           listEntries.set(fd, source.entry);
-          if (parsed.move) listEntries.delete(parsed.sourceFd);
+          rebound(fd);
+          if (parsed.move) {
+            listEntries.delete(parsed.sourceFd);
+            rebound(parsed.sourceFd);
+          }
         }
         if (
           parsed.move &&
@@ -833,6 +878,7 @@ async function prepareRedirectionsWithState(
         const entry = openedHere(opened.entry as FdEntry);
         setFdEntry(ctx, fd, entry);
         listEntries.set(fd, entry);
+        rebound(fd);
       } else if (redir.operator === "<<<") {
         const entry = openedHere<FdEntry>({
           kind: "input",
@@ -840,6 +886,7 @@ async function prepareRedirectionsWithState(
         });
         setFdEntry(ctx, fd, entry);
         listEntries.set(fd, entry);
+        rebound(fd);
       } else if (redir.operator === "<" || redir.operator === "<>") {
         const opened = await readInputEntry(
           ctx,
@@ -850,6 +897,7 @@ async function prepareRedirectionsWithState(
         const entry = openedHere(opened.entry as FdEntry);
         setFdEntry(ctx, fd, entry);
         listEntries.set(fd, entry);
+        rebound(fd);
       }
       continue;
     }
@@ -861,6 +909,7 @@ async function prepareRedirectionsWithState(
           stdinSourceFd = -1;
         }
         if (effectiveFd !== null && effectiveFd < FIRST_USER_FD) {
+          rebound(effectiveFd);
           standardRoutes.set(effectiveFd, { kind: "closed" });
           if (transaction.policy === "persistent") {
             closeFd(ctx, effectiveFd);
@@ -974,6 +1023,7 @@ async function prepareRedirectionsWithState(
         if (parsed.sourceFd >= FIRST_USER_FD) {
           closeFd(ctx, parsed.sourceFd);
         } else {
+          rebound(parsed.sourceFd);
           standardRoutes.set(parsed.sourceFd, { kind: "closed" });
           if (transaction.policy === "persistent") {
             closeFd(ctx, parsed.sourceFd);
@@ -1489,8 +1539,10 @@ export async function applyRedirections(
     // of the fd table was decoded on lookup, so two dups of one open arrive as
     // two equal objects; the alias group is what still ties them together,
     // being exactly the set of fds on that open.
-    const aliasesBehind = (sink: RedirectSink): number[] | undefined =>
-      sink.kind === "descriptor" ? sink.source.descriptors : undefined;
+    const aliasesBehind = (
+      sink: RedirectSink,
+    ): { descriptors: number[]; rebindings?: number[] } | undefined =>
+      sink.kind === "descriptor" ? sink.source : undefined;
     // Whether the sink is an open this redirection list performed, rather
     // than a descriptor that predates it.
     const openedHere = (sink: RedirectSink): boolean =>
@@ -1528,13 +1580,20 @@ export async function applyRedirections(
       // open, and the two alias groups both list 3 without either dup being
       // on the other's descriptor.
       if (openedHere(fd1Sink) || openedHere(fd2Sink)) return false;
+      // Two snapshots of one alias group name the same open only through an
+      // fd that neither saw re-pointed in between: `1>&3 3>&4 2>&3` lists 3
+      // in both, on two different opens.
       const fd1Aliases = aliasesBehind(fd1Sink);
       const fd2Aliases = aliasesBehind(fd2Sink);
-      return (
-        fd1Aliases !== undefined &&
-        fd2Aliases !== undefined &&
-        fd1Aliases.some((fd) => fd2Aliases.includes(fd))
-      );
+      if (fd1Aliases === undefined || fd2Aliases === undefined) return false;
+      return fd1Aliases.descriptors.some((fd, i) => {
+        const j = fd2Aliases.descriptors.indexOf(fd);
+        return (
+          j !== -1 &&
+          (fd1Aliases.rebindings?.[i] ?? 0) ===
+            (fd2Aliases.rebindings?.[j] ?? 0)
+        );
+      });
     };
     // Which of the caller's own streams each pending string ended up on, if
     // either did. Only those two are still described by the result returned

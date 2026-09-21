@@ -103,6 +103,37 @@ describe("fd duplication ordering through control flow", () => {
     expect(result.stdout).toBe("O1\nE1\nO2\n");
     expect(result.stderr).toBe("");
   });
+
+  // `eval` and `source` run a script of their own, whose accumulated output
+  // is prepended to a control-flow error on its way out. The order goes with
+  // it, so the scope that catches the error can still merge along it.
+  it.each([
+    ["exit", "{ eval 'echo O1; echo E1 1>&2; echo O2; exit'; } 2>&1"],
+    [
+      "return",
+      "f() { eval 'echo O1; echo E1 1>&2; echo O2; return'; }; f 2>&1",
+    ],
+    [
+      "break",
+      "for i in 1; do eval 'echo O1; echo E1 1>&2; echo O2; break'; done 2>&1",
+    ],
+    [
+      "continue",
+      "for i in 1; do eval 'echo O1; echo E1 1>&2; echo O2; continue'; done 2>&1",
+    ],
+  ])("keeps the order of an eval script that leaves on %s", async (_, script) => {
+    const result = await new Bash().exec(script);
+    expect(result.stdout).toBe("O1\nE1\nO2\n");
+    expect(result.stderr).toBe("");
+  });
+
+  it("keeps the order of a list that errexit ends", async () => {
+    const result = await new Bash().exec(
+      "set -e; { echo O1 && echo E1 1>&2 && echo O2 && false; } 2>&1 | cat",
+    );
+    expect(result.stdout).toBe("O1\nE1\nO2\n");
+    expect(result.stderr).toBe("");
+  });
 });
 
 /**

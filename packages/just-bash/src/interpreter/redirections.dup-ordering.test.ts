@@ -241,4 +241,28 @@ describe("fd duplication descriptor identity", () => {
     await env.exec(`exec 3> /a; ${body} 4>&3 3> /b 1>&3 2>&4`);
     expect(await files(env, "/a", "/b")).toEqual(["E", "O"]);
   });
+
+  it("keeps the streams apart when the fd is re-pointed at another exec'd open", async () => {
+    const env = new Bash();
+    // Neither open is the list's own, so identity is the alias group, and
+    // fd 3 is in both snapshots: only the count of times the list had
+    // re-pointed it tells the two apart.
+    await env.exec(`exec 3> /a; exec 4> /b; ${body} 1>&3 3>&4 2>&3`);
+    expect(await files(env, "/a", "/b")).toEqual(["O", "E"]);
+  });
+
+  it("merges through an fd re-pointed at the open the other dup holds", async () => {
+    const env = new Bash();
+    await env.exec(`exec 3> /a; ${body} 1>&3 3>&1 2>&3`);
+    expect(await files(env, "/a")).toEqual(["OE"]);
+  });
+});
+
+describe("recorded order at the public boundary", () => {
+  it("hands the caller the two streams and not the pieces", async () => {
+    const result = await new Bash().exec("{ echo O; echo E 1>&2; }");
+    expect(result.stdout).toBe("O\n");
+    expect(result.stderr).toBe("E\n");
+    expect("internalOutputChunks" in result).toBe(false);
+  });
 });

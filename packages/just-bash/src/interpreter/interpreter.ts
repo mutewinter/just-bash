@@ -423,6 +423,7 @@ export class Interpreter {
     args: string[],
     stdin = "",
     stdinOwned = false,
+    stdinClosed = false,
   ): Promise<ExecResult> {
     return executeUserScriptHelper(
       this.ctx,
@@ -430,6 +431,7 @@ export class Interpreter {
       args,
       stdin,
       stdinOwned,
+      stdinClosed,
       (ast) => this.executeScript(ast),
     );
   }
@@ -551,11 +553,17 @@ export class Interpreter {
     node: CommandNode,
     stdin: string,
     stdinOwned = false,
+    stdinClosed = false,
   ): Promise<ExecResult> {
     const procSubMark = markProcessSubstitutions(this.ctx);
     let result: ExecResult;
     try {
-      result = await this.executeCommandInner(node, stdin, stdinOwned);
+      result = await this.executeCommandInner(
+        node,
+        stdin,
+        stdinOwned,
+        stdinClosed,
+      );
     } catch (error) {
       await releaseProcessSubstitutions(this.ctx, procSubMark).catch(
         () => undefined,
@@ -580,29 +588,30 @@ export class Interpreter {
     node: CommandNode,
     stdin: string,
     stdinOwned: boolean,
+    stdinClosed: boolean,
   ): Promise<ExecResult> {
     this.assertDefenseContext("command");
 
     this.ctx.coverage?.hit(`bash:cmd:${node.type}`);
     switch (node.type) {
       case "SimpleCommand":
-        return this.executeSimpleCommand(node, stdin, stdinOwned);
+        return this.executeSimpleCommand(node, stdin, stdinOwned, stdinClosed);
       case "If":
-        return executeIf(this.ctx, node, stdin, stdinOwned);
+        return executeIf(this.ctx, node, stdin, stdinOwned, stdinClosed);
       case "For":
-        return executeFor(this.ctx, node, stdin, stdinOwned);
+        return executeFor(this.ctx, node, stdin, stdinOwned, stdinClosed);
       case "CStyleFor":
-        return executeCStyleFor(this.ctx, node, stdin, stdinOwned);
+        return executeCStyleFor(this.ctx, node, stdin, stdinOwned, stdinClosed);
       case "While":
-        return executeWhile(this.ctx, node, stdin, stdinOwned);
+        return executeWhile(this.ctx, node, stdin, stdinOwned, stdinClosed);
       case "Until":
-        return executeUntil(this.ctx, node, stdin, stdinOwned);
+        return executeUntil(this.ctx, node, stdin, stdinOwned, stdinClosed);
       case "Case":
-        return executeCase(this.ctx, node, stdin, stdinOwned);
+        return executeCase(this.ctx, node, stdin, stdinOwned, stdinClosed);
       case "Subshell":
-        return this.executeSubshell(node, stdin, stdinOwned);
+        return this.executeSubshell(node, stdin, stdinOwned, stdinClosed);
       case "Group":
-        return this.executeGroup(node, stdin, stdinOwned);
+        return this.executeGroup(node, stdin, stdinOwned, stdinClosed);
       case "FunctionDef":
         return executeFunctionDef(this.ctx, node);
       case "ArithmeticCommand":
@@ -618,6 +627,7 @@ export class Interpreter {
     node: SimpleCommandNode,
     stdin: string,
     stdinOwned = false,
+    stdinClosed = false,
   ): Promise<ExecResult> {
     let transaction: RedirectionTransaction | undefined;
     try {
@@ -625,6 +635,7 @@ export class Interpreter {
         node,
         stdin,
         stdinOwned,
+        stdinClosed,
         (created) => {
           transaction = created;
         },
@@ -645,6 +656,7 @@ export class Interpreter {
     node: SimpleCommandNode,
     stdin: string,
     stdinOwned: boolean,
+    stdinClosed: boolean,
     onTransaction: (transaction: RedirectionTransaction) => void,
   ): Promise<ExecResult> {
     // Update currentLine for $LINENO
@@ -898,14 +910,20 @@ export class Interpreter {
     // the enclosing one; `0<&-` counts, since a closed fd 0 is still not the
     // shell's. It is connected when something is on the other end: a
     // redirection or a pipe that this command carries, or, for an fd 0 no
-    // redirection touched (`<&0` included), the pipe, enclosing stream, or
-    // bytes the command inherited. A closed fd 0 is connected to nothing.
+    // redirection touched (`<&0` included), whatever the command inherited:
+    // an owned stream from the caller, bytes, or the enclosing scope's stream,
+    // each of which can itself be a closed fd 0 carried down from a `0<&-`
+    // higher up. A closed fd 0 is connected to nothing.
     const stdinRedirected =
       stdinOwned || preparedRedirections.stdin !== undefined;
     const fd0 = preparedRedirections.standardRoutes.get(0);
     const stdinConnected =
       fd0 === undefined || (fd0.kind === "dup-in" && fd0.sourceFd === 0)
-        ? stdinOwned || stdin !== "" || this.ctx.state.groupStdin !== undefined
+        ? stdinOwned
+          ? !stdinClosed || stdin !== ""
+          : stdin !== "" ||
+            (this.ctx.state.groupStdin !== undefined &&
+              !this.ctx.state.groupStdinClosed)
         : fd0.kind !== "closed";
     if (preparedRedirections.stdin !== undefined) {
       stdin = preparedRedirections.stdin;
@@ -1121,8 +1139,8 @@ export class Interpreter {
       runCommand: (name, a, qa, s, sf, udp, ssf, sr, sc) =>
         this.runCommand(name, a, qa, s, sf, udp, ssf, sr, sc),
       buildExportedEnv: () => this.buildExportedEnv(),
-      executeUserScript: (path, a, s, so) =>
-        this.executeUserScript(path, a, s, so),
+      executeUserScript: (path, a, s, so, sc) =>
+        this.executeUserScript(path, a, s, so, sc),
     };
 
     // Try builtin dispatch first
@@ -1176,6 +1194,7 @@ export class Interpreter {
     node: SubshellNode,
     stdin = "",
     stdinOwned = false,
+    stdinClosed = false,
   ): Promise<ExecResult> {
     return executeSubshellHelper(
       this.ctx,
@@ -1183,6 +1202,7 @@ export class Interpreter {
       stdin,
       (stmt) => this.executeStatement(stmt),
       stdinOwned,
+      stdinClosed,
     );
   }
 
@@ -1190,6 +1210,7 @@ export class Interpreter {
     node: GroupNode,
     stdin = "",
     stdinOwned = false,
+    stdinClosed = false,
   ): Promise<ExecResult> {
     return executeGroupHelper(
       this.ctx,
@@ -1197,6 +1218,7 @@ export class Interpreter {
       stdin,
       (stmt) => this.executeStatement(stmt),
       stdinOwned,
+      stdinClosed,
     );
   }
 

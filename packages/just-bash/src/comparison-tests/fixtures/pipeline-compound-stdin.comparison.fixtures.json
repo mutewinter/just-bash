@@ -17,6 +17,15 @@
     "stderr": "",
     "exitCode": 0
   },
+  "2e1d991b46bb026e": {
+    "command": "printf \"a\\nb\\n\" | source ./lib.sh",
+    "files": {
+      "lib.sh": "read x; echo \"sourced=[$x]\"\n"
+    },
+    "stdout": "sourced=[a]\n",
+    "stderr": "",
+    "exitCode": 0
+  },
   "622260a3da8c33cd": {
     "command": "printf \"a\\nb\\n\" | if true; then cat; fi",
     "files": {},
@@ -28,6 +37,15 @@
     "command": "printf \"a\\nb\\n\" | case y in y) read x; echo \"case=[$x]\" ;; esac",
     "files": {},
     "stdout": "case=[a]\n",
+    "stderr": "",
+    "exitCode": 0
+  },
+  "6c4a663937a69eb6": {
+    "command": "printf \"a\\nb\\n\" | { source ./lib.sh; read y; echo \"y=[$y]\"; }",
+    "files": {
+      "lib.sh": "read x; echo \"sourced=[$x]\"\n"
+    },
+    "stdout": "sourced=[a]\ny=[b]\n",
     "stderr": "",
     "exitCode": 0
   },

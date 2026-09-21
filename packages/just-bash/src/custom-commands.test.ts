@@ -412,8 +412,18 @@ describe("custom-commands", () => {
         ["a pipe into a nested shell", "printf '' | bash -c probe"],
         ["a pipe into `command`", "printf '' | command probe"],
         ["a pipe into `exec`", "printf '' | exec probe"],
+        ["a pipe into `eval`", "printf '' | eval probe"],
+        ["a pipe into `source`", "printf '' | source /script"],
         ["an empty here-string", "probe <<< ''"],
         ["a self-duplication inside a pipe", "printf '' | probe <&0"],
+        [
+          "a closed fd 0 reopened by an inner redirection",
+          "{ probe < /empty; } 0<&-",
+        ],
+        [
+          "a closed fd 0 reopened by a function's own redirection",
+          "f() { probe; } < /empty; f 0<&-",
+        ],
       ])("is true for %s, even with no bytes", async (_, script) => {
         expect((await run(script)).stdout).toBe("pipe\n");
       });
@@ -424,8 +434,25 @@ describe("custom-commands", () => {
         ["a self-duplication of an unconnected fd 0", "probe <&0"],
         ["a script run with nothing to hand on", "/script"],
         ["an if with nothing to hand on", "if true; then probe; fi"],
+        ["a closed fd 0 on a group", "{ probe; } 0<&-"],
+        ["a closed fd 0 on a subshell", "(probe) 0<&-"],
+        ["a closed fd 0 on a function call", "f() { probe; }; f 0<&-"],
+        ["a closed fd 0 on a function definition", "f() { probe; } 0<&-; f"],
+        ["a closed fd 0 on `eval`", "eval probe 0<&-"],
+        ["a closed fd 0 on `source`", "source /script 0<&-"],
+        ["a closed fd 0 on an executable script", "/script 0<&-"],
+        ["a closed fd 0 on an if", "if true; then probe; fi 0<&-"],
+        ["a closed fd 0 on a while", "while probe; do break; done 0<&-"],
+        ["a closed fd 0 two scopes up", "f() { probe; }; { { f; }; } 0<&-"],
+        ["a closed fd 0 inside a pipe", "printf '' | { probe; } 0<&-"],
       ])("is false for %s", async (_, script) => {
         expect((await run(script)).stdout).toBe("none\n");
+      });
+
+      it("is false inside a closed scope and true again outside it", async () => {
+        expect(
+          (await run("printf '' | { { probe; } 0<&-; probe; }")).stdout,
+        ).toBe("none\npipe\n");
       });
 
       it("is false again once the pipeline is over", async () => {

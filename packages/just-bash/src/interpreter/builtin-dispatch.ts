@@ -426,6 +426,7 @@ export type ExecuteUserScriptFn = (
   args: string[],
   stdin?: string,
   stdinOwned?: boolean,
+  stdinClosed?: boolean,
 ) => Promise<ExecResult>;
 
 /**
@@ -467,6 +468,9 @@ export async function dispatchBuiltin(
   stdinConnected = false,
 ): Promise<ExecResult | null> {
   const { ctx, runCommand } = dispatchCtx;
+  // An owned fd 0 with nothing on it is a closed one (`cmd 0<&-`), which the
+  // scopes below carry as such rather than as an owned empty stream.
+  const stdinClosed = stdinRedirected && !stdinConnected;
 
   // Coverage tracking for builtins (lightweight: only fires when coverage is enabled)
   if (ctx.coverage && SHELL_BUILTINS.has(commandName)) {
@@ -501,7 +505,7 @@ export async function dispatchBuiltin(
   // In POSIX mode, eval is a special builtin that cannot be overridden by functions
   // In non-POSIX mode (bash default), functions can override eval
   if (commandName === "eval" && ctx.state.options.posix) {
-    return handleEval(ctx, args, stdin, stdinRedirected);
+    return handleEval(ctx, args, stdin, stdinRedirected, stdinClosed);
   }
   if (commandName === "shift") {
     return handleShift(ctx, args);
@@ -528,7 +532,7 @@ export async function dispatchBuiltin(
     return handleDirs(ctx, args);
   }
   if (commandName === "source" || commandName === ".") {
-    return handleSource(ctx, args);
+    return handleSource(ctx, args, stdin, stdinRedirected, stdinClosed);
   }
   if (commandName === "read") {
     return handleRead(ctx, args, stdin, stdinSourceFd);
@@ -547,7 +551,15 @@ export async function dispatchBuiltin(
   if (!skipFunctions) {
     const func = ctx.state.functions.get(commandName);
     if (func) {
-      return callFunction(ctx, func, args, stdin, undefined, stdinRedirected);
+      return callFunction(
+        ctx,
+        func,
+        args,
+        stdin,
+        undefined,
+        stdinRedirected,
+        stdinClosed,
+      );
     }
   }
   // Internal transform primitive, reached through `builtin` so a user-defined
@@ -580,7 +592,7 @@ export async function dispatchBuiltin(
   // Simple builtins (can be overridden by functions)
   // eval: In non-POSIX mode, functions can override eval (handled above for POSIX mode)
   if (commandName === "eval") {
-    return handleEval(ctx, args, stdin, stdinRedirected);
+    return handleEval(ctx, args, stdin, stdinRedirected, stdinClosed);
   }
   if (commandName === "cd") {
     return await handleCd(ctx, args);
@@ -836,7 +848,13 @@ export async function executeExternalCommand(
       }
       ctx.state.hashTable.set(commandName, resolved.path);
     }
-    return await executeUserScript(resolved.path, args, stdin, stdinOwned);
+    return await executeUserScript(
+      resolved.path,
+      args,
+      stdin,
+      stdinOwned,
+      stdinOwned && !stdinConnected,
+    );
   }
   const { cmd, path: cmdPath } = resolved;
   // Add to hash table for PATH caching (only for non-path commands)

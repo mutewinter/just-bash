@@ -9,9 +9,10 @@ import {
 /**
  * A compound command that sits after a `|` reads the pipe, whichever kind of
  * compound command it is: bash hands the previous stage's stdout to an `if`,
- * a `for`, or a `case` exactly as it does to a `while`. Recorded against GNU
- * bash 3.2.57. Every command has its stdin piped at the outermost level so
- * recording never blocks on the recorder's own stdin.
+ * a `for`, or a `case` exactly as it does to a `while`, and to the file a
+ * `source` runs. Recorded against GNU bash 3.2.57. Every command has its
+ * stdin piped at the outermost level so recording never blocks on the
+ * recorder's own stdin.
  */
 
 describe("compound commands in a pipeline - Real Bash Comparison", () => {
@@ -94,6 +95,24 @@ describe("compound commands in a pipeline - Real Bash Comparison", () => {
       env,
       testDir,
       '{ printf "a\\nb\\n" | if true; then read x; echo "if=[$x]"; fi; read y; echo "y=[$y]"; } < outer.txt',
+    );
+  });
+
+  it("a sourced file reads the pipe", async () => {
+    const env = await setupFiles(testDir, {
+      "lib.sh": 'read x; echo "sourced=[$x]"\n',
+    });
+    await compareOutputs(env, testDir, 'printf "a\\nb\\n" | source ./lib.sh');
+  });
+
+  it("a sourced file's reads advance the shared position outside it", async () => {
+    const env = await setupFiles(testDir, {
+      "lib.sh": 'read x; echo "sourced=[$x]"\n',
+    });
+    await compareOutputs(
+      env,
+      testDir,
+      'printf "a\\nb\\n" | { source ./lib.sh; read y; echo "y=[$y]"; }',
     );
   });
 

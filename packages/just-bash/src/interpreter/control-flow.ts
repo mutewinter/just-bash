@@ -45,7 +45,11 @@ import { executeCondition } from "./helpers/condition.js";
 import { getErrorMessage } from "./helpers/errors.js";
 import { handleLoopError } from "./helpers/loop.js";
 import { failure, throwExecutionLimit } from "./helpers/result.js";
-import { withPreparedRedirections } from "./redirections.js";
+import {
+  ownedStdinClosed,
+  type PreparedRedirections,
+  withPreparedRedirections,
+} from "./redirections.js";
 import type { InterpreterContext } from "./types.js";
 
 /**
@@ -62,29 +66,34 @@ import type { InterpreterContext } from "./types.js";
  *
  * Empty content still counts as ownership — `done < empty-file` gives the body
  * an empty stream rather than the enclosing one, and so does a pipeline stage
- * whose producer printed nothing, which is why the pipeline says whether it
- * handed one over (`pipelineOwned`) rather than leaving the bytes to tell.
+ * whose producer printed nothing, which is why the caller says whether it
+ * handed one over (`stdinOwned`) rather than leaving the bytes to tell, and
+ * whether what it handed over is a closed fd 0 (`stdinClosed`).
  */
 async function withCompoundStdin(
   ctx: InterpreterContext,
-  ownStdin: string | undefined,
-  pipelineStdin: string,
-  pipelineOwned: boolean,
+  prepared: PreparedRedirections,
+  stdin: string,
+  stdinOwned: boolean,
+  stdinClosed: boolean,
   run: () => Promise<ExecResult>,
 ): Promise<ExecResult> {
   const owned =
-    ownStdin !== undefined
-      ? ownStdin
-      : pipelineOwned || pipelineStdin !== ""
-        ? pipelineStdin
+    prepared.stdin !== undefined
+      ? prepared.stdin
+      : stdinOwned || stdin !== ""
+        ? stdin
         : undefined;
   if (owned === undefined) return run();
   const savedGroupStdin = ctx.state.groupStdin;
+  const savedGroupStdinClosed = ctx.state.groupStdinClosed;
   ctx.state.groupStdin = owned;
+  ctx.state.groupStdinClosed = ownedStdinClosed(prepared, stdin, stdinClosed);
   try {
     return await run();
   } finally {
     ctx.state.groupStdin = savedGroupStdin;
+    ctx.state.groupStdinClosed = savedGroupStdinClosed;
   }
 }
 
@@ -180,9 +189,10 @@ export async function executeIf(
   node: IfNode,
   stdin = "",
   stdinOwned = false,
+  stdinClosed = false,
 ): Promise<ExecResult> {
   return withPreparedRedirections(ctx, node.redirections, stdin, (prepared) =>
-    withCompoundStdin(ctx, prepared.stdin, stdin, stdinOwned, () =>
+    withCompoundStdin(ctx, prepared, stdin, stdinOwned, stdinClosed, () =>
       executeIfBody(ctx, node),
     ),
   );
@@ -216,9 +226,10 @@ export async function executeFor(
   node: ForNode,
   stdin = "",
   stdinOwned = false,
+  stdinClosed = false,
 ): Promise<ExecResult> {
   return withPreparedRedirections(ctx, node.redirections, stdin, (prepared) =>
-    withCompoundStdin(ctx, prepared.stdin, stdin, stdinOwned, () =>
+    withCompoundStdin(ctx, prepared, stdin, stdinOwned, stdinClosed, () =>
       executeForBody(ctx, node),
     ),
   );
@@ -314,9 +325,10 @@ export async function executeCStyleFor(
   node: CStyleForNode,
   stdin = "",
   stdinOwned = false,
+  stdinClosed = false,
 ): Promise<ExecResult> {
   return withPreparedRedirections(ctx, node.redirections, stdin, (prepared) =>
-    withCompoundStdin(ctx, prepared.stdin, stdin, stdinOwned, () =>
+    withCompoundStdin(ctx, prepared, stdin, stdinOwned, stdinClosed, () =>
       executeCStyleForBody(ctx, node),
     ),
   );
@@ -409,9 +421,10 @@ export async function executeWhile(
   node: WhileNode,
   stdin = "",
   stdinOwned = false,
+  stdinClosed = false,
 ): Promise<ExecResult> {
   return withPreparedRedirections(ctx, node.redirections, stdin, (prepared) =>
-    withCompoundStdin(ctx, prepared.stdin, stdin, stdinOwned, () =>
+    withCompoundStdin(ctx, prepared, stdin, stdinOwned, stdinClosed, () =>
       executeWhileBody(ctx, node),
     ),
   );
@@ -519,9 +532,10 @@ export async function executeUntil(
   node: UntilNode,
   stdin = "",
   stdinOwned = false,
+  stdinClosed = false,
 ): Promise<ExecResult> {
   return withPreparedRedirections(ctx, node.redirections, stdin, (prepared) =>
-    withCompoundStdin(ctx, prepared.stdin, stdin, stdinOwned, () =>
+    withCompoundStdin(ctx, prepared, stdin, stdinOwned, stdinClosed, () =>
       executeUntilBody(ctx, node),
     ),
   );
@@ -588,9 +602,10 @@ export async function executeCase(
   node: CaseNode,
   stdin = "",
   stdinOwned = false,
+  stdinClosed = false,
 ): Promise<ExecResult> {
   return withPreparedRedirections(ctx, node.redirections, stdin, (prepared) =>
-    withCompoundStdin(ctx, prepared.stdin, stdin, stdinOwned, () =>
+    withCompoundStdin(ctx, prepared, stdin, stdinOwned, stdinClosed, () =>
       executeCaseBody(ctx, node),
     ),
   );

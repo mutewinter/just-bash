@@ -27,13 +27,16 @@ setBlockExecutor(executeBlock);
 function appendAwkOutput(ctx: AwkRuntimeContext, text: string): void {
   // Two writes can split one character: a high surrogate ending the output so
   // far and a low one starting this write measure 3 bytes each apart and 4
-  // together, which is what the output now holds.
-  const last = ctx.output.charCodeAt(ctx.output.length - 1);
+  // together, which is what the output now holds. The last code unit is kept
+  // on the context rather than read back from `output`, since reading a
+  // character of a string built by `+=` flattens all of it.
+  const last = ctx.lastOutputCode;
   const first = text.charCodeAt(0);
   const joinsSurrogatePair =
     last >= 0xd800 && last <= 0xdbff && first >= 0xdc00 && first <= 0xdfff;
   ctx.output += text;
   ctx.outputBytes += utf8ByteLength(text) - (joinsSurrogatePair ? 2 : 0);
+  if (text.length > 0) ctx.lastOutputCode = text.charCodeAt(text.length - 1);
   checkAwkOutputSize(ctx);
 }
 

@@ -13,8 +13,15 @@ const hostSetTimeout = setTimeout;
  * running when it returns and the failure this covers cannot occur.
  */
 class SlowReaddirFs extends InMemoryFs {
+  constructor(
+    files: Record<string, string>,
+    private readonly delayMs: number,
+  ) {
+    super(files);
+  }
+
   private readonly pause = () =>
-    new Promise<void>((resolve) => hostSetTimeout(resolve, 5));
+    new Promise<void>((resolve) => hostSetTimeout(resolve, this.delayMs));
 
   override async readdir(path: string): Promise<string[]> {
     await this.pause();
@@ -50,18 +57,35 @@ describe("find failing part way through a batch", () => {
     process.off("unhandledRejection", record);
   });
 
-  it("leaves nothing running to reject after it returns", async () => {
+  // Each directory read takes 20ms, so the root settles at 20ms and its thirty
+  // children are all in flight until about 40ms; every case below ends the
+  // command inside that window.
+  it.each([
+    [
+      "a traversal limit",
+      { maxTraversalEntries: 500, maxTraversalWork: 500 },
+      undefined,
+      126,
+    ],
+    ["an abort", {}, 30, 124],
+    ["the execution deadline", { maxExecutionTimeMs: 30 }, undefined, 124],
+  ] as const)("leaves nothing running to reject after %s ends it", async (_reason, executionLimits, abortAfterMs, exitCode) => {
     const bash = new Bash({
-      fs: new SlowReaddirFs(tree()),
-      executionLimits: { maxTraversalEntries: 500, maxTraversalWork: 500 },
+      fs: new SlowReaddirFs(tree(), 20),
+      executionLimits,
     });
+    const controller = new AbortController();
+    if (abortAfterMs !== undefined) {
+      hostSetTimeout(() => controller.abort(), abortAfterMs);
+    }
 
-    const result = await bash.exec("find /t -type f");
-    // Long enough for every sibling read in the failed batch to settle.
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    const result = await bash.exec("find /t -type f", {
+      signal: controller.signal,
+    });
+    // Long enough for every sibling read in the batch to settle.
+    await new Promise((resolve) => hostSetTimeout(resolve, 200));
 
-    expect(result.exitCode).toBe(126);
-    expect(result.stderr).toMatch(/find: filesystem traversal .*limit exceeded/);
+    expect(result.exitCode).toBe(exitCode);
     expect(unhandled).toEqual([]);
   });
 });

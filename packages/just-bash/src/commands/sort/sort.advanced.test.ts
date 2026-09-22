@@ -37,6 +37,33 @@ describe("sort -h (human numeric)", () => {
     expect(result.stdout).toBe("1G\n1M\n1K\n");
     expect(result.exitCode).toBe(0);
   });
+
+  it("should sort du output by the size that leads each line", async () => {
+    const env = new Bash({
+      files: { "/du.txt": "872M\t./a\n912K\t./b\n935M\t./c\n1.5G\t./d\n4.0K\t./e\n" },
+    });
+    const result = await env.exec("sort -h /du.txt");
+    expect(result.stdout).toBe(
+      "4.0K\t./e\n912K\t./b\n872M\t./a\n935M\t./c\n1.5G\t./d\n",
+    );
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("should put the largest du entry first with -rh", async () => {
+    const env = new Bash({
+      files: { "/du.txt": "872M\t./a\n1.5G\t./d\n912K\t./b\n" },
+    });
+    const result = await env.exec("sort -rh /du.txt | head -1");
+    expect(result.stdout).toBe("1.5G\t./d\n");
+  });
+
+  it("should read a size followed by other text in a keyed field", async () => {
+    const env = new Bash({
+      files: { "/test.txt": "a 10MiB used\nb 2KiB used\nc 1GiB used\n" },
+    });
+    const result = await env.exec("sort -k2 -h /test.txt");
+    expect(result.stdout).toBe("b 2KiB used\na 10MiB used\nc 1GiB used\n");
+  });
 });
 
 describe("sort -V (version)", () => {

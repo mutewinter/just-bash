@@ -30,18 +30,13 @@ const MONTHS = new Map<string, number>([
 ]);
 
 /**
- * Parse a human-readable size like "1K", "2.5M", "3G"
+ * Parse a human-readable size like "1K", "2.5M", "3G" from the start of a
+ * key, ignoring whatever follows it, as GNU sort does. Without a key the key
+ * is the whole line, so `du -h` output reaches here as `872M\t./dir`.
  */
 function parseHumanSize(s: string): number {
-  const trimmed = s.trim();
-  const match = trimmed.match(
-    /^([+-]?\d*\.?\d+)\s*([kmgtpeKMGTPE])?[iI]?[bB]?$/,
-  );
-  if (!match) {
-    // Try to parse as plain number
-    const num = parseFloat(trimmed);
-    return Number.isNaN(num) ? 0 : num;
-  }
+  const match = s.trim().match(/^([+-]?\d*\.?\d+)\s*([kmgtpeKMGTPE])?/);
+  if (!match) return 0;
   const num = parseFloat(match[1]);
   const suffix = (match[2] || "").toLowerCase();
   const multiplier = SIZE_SUFFIXES.get(suffix) ?? 1;

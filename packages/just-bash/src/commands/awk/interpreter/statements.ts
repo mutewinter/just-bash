@@ -25,8 +25,15 @@ setBlockExecutor(executeBlock);
  * Throws ExecutionLimitError if the limit is set and exceeded.
  */
 function appendAwkOutput(ctx: AwkRuntimeContext, text: string): void {
+  // Two writes can split one character: a high surrogate ending the output so
+  // far and a low one starting this write measure 3 bytes each apart and 4
+  // together, which is what the output now holds.
+  const last = ctx.output.charCodeAt(ctx.output.length - 1);
+  const first = text.charCodeAt(0);
+  const joinsSurrogatePair =
+    last >= 0xd800 && last <= 0xdbff && first >= 0xdc00 && first <= 0xdfff;
   ctx.output += text;
-  ctx.outputBytes += utf8ByteLength(text);
+  ctx.outputBytes += utf8ByteLength(text) - (joinsSurrogatePair ? 2 : 0);
   checkAwkOutputSize(ctx);
 }
 

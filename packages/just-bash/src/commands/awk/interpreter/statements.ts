@@ -24,6 +24,12 @@ setBlockExecutor(executeBlock);
  * Check if AWK output buffer has exceeded the maximum size.
  * Throws ExecutionLimitError if the limit is set and exceeded.
  */
+function appendAwkOutput(ctx: AwkRuntimeContext, text: string): void {
+  ctx.output += text;
+  ctx.outputBytes += utf8ByteLength(text);
+  checkAwkOutputSize(ctx);
+}
+
 function checkAwkOutputSize(ctx: AwkRuntimeContext): void {
   if (ctx.maxOutputSize > 0 && ctx.output.length > ctx.maxOutputSize) {
     throw new ExecutionLimitError(
@@ -230,8 +236,7 @@ async function executePrint(
       writeToFile(ctx, output.redirect, output.file, text),
     );
   } else {
-    ctx.output += text;
-    checkAwkOutputSize(ctx);
+    appendAwkOutput(ctx, text);
   }
 }
 
@@ -261,7 +266,7 @@ async function executePrintf(
   // DEBUG: console.log("printf DEBUG:", JSON.stringify({formatStr, values}));
   const remainingOutput =
     ctx.maxOutputSize > 0
-      ? Math.max(0, ctx.maxOutputSize - utf8ByteLength(ctx.output))
+      ? Math.max(0, ctx.maxOutputSize - ctx.outputBytes)
       : undefined;
   const text = formatPrintf(formatStr, values, remainingOutput);
 
@@ -270,8 +275,7 @@ async function executePrintf(
       writeToFile(ctx, output.redirect, output.file, text),
     );
   } else {
-    ctx.output += text;
-    checkAwkOutputSize(ctx);
+    appendAwkOutput(ctx, text);
   }
 }
 
@@ -288,8 +292,7 @@ async function writeToFile(
   const fs = ctx.fs;
   if (!fs || !ctx.cwd) {
     // No filesystem access - just append to output
-    ctx.output += text;
-    checkAwkOutputSize(ctx);
+    appendAwkOutput(ctx, text);
     return;
   }
 

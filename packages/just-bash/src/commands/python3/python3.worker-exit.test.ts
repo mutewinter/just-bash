@@ -8,7 +8,7 @@ import type { RuntimeCommandContext } from "../../types.js";
 // to load, crashes, or exits early. The bridge here is the real one, so a run
 // that is not told the worker is gone waits out the whole script timeout.
 const mockState = vi.hoisted(() => ({
-  death: "exit" as "exit" | "error",
+  death: "exit" as "exit" | "error" | "construct",
 }));
 
 vi.mock("node:worker_threads", () => {
@@ -16,9 +16,12 @@ vi.mock("node:worker_threads", () => {
     private handlers = new Map<string, Array<(payload?: unknown) => void>>();
 
     constructor() {
+      if (mockState.death === "construct") {
+        throw new Error("Cannot find module worker.js");
+      }
       queueMicrotask(() => {
         const payload =
-          mockState.death === "error"
+          mockState.death !== "exit"
             ? new Error("Cannot find module worker.js")
             : 1;
         for (const cb of this.handlers.get(mockState.death) ?? []) {
@@ -68,7 +71,7 @@ describe("python3 worker that dies before its bridge EXIT", () => {
     _resetExecutionQueue();
   });
 
-  it.each(["exit", "error"] as const)(
+  it.each(["exit", "error", "construct"] as const)(
     "fails at once on %s instead of waiting out the timeout",
     { timeout: 5_000 },
     async (death) => {

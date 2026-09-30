@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -167,6 +167,27 @@ EOF`);
   });
 
   describe("errors from the host filesystem", () => {
+    it("releases descriptors after repeated caught oversized opens", async () => {
+      const env = new Bash({
+        python: true,
+        executionLimits: { maxStringLength: 1024 },
+      });
+      await env.fs.writeFile("/tmp/big.bin", "x".repeat(2048));
+      await env.fs.writeFile("/tmp/small.txt", "ok");
+      const result = await env.exec(`python3 <<'PY'
+for _ in range(4100):
+    try:
+        open('/tmp/big.bin', 'rb')
+    except OSError as error:
+        if error.errno != 22:
+            raise
+with open('/tmp/small.txt') as file:
+    print(file.read())
+PY`);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe("ok\n");
+      expect(result.exitCode).toBe(0);
+    }, 30000);
     it("reports a file over the size limit as EFBIG, once", async () => {
       const env = new Bash({
         python: true,
@@ -202,29 +223,33 @@ EOF`);
     });
 
     it("reports a write into a read-only mount as EROFS", async () => {
-      const root = mkdtempSync(join(tmpdir(), "python3-readonly-"));
-      writeFileSync(join(root, "note.txt"), "hello\n");
-      const fs = new MountableFs({ base: new InMemoryFs() });
-      fs.mount(
-        "/mnt/ro",
-        new OverlayFs({ mountPoint: "/", readOnly: true, root }),
-      );
-      const env = new Bash({ cwd: "/", fs, python: true });
+      const root = await mkdtemp(join(tmpdir(), "python3-readonly-"));
+      try {
+        await writeFile(join(root, "note.txt"), "hello\n");
+        const fs = new MountableFs({ base: new InMemoryFs() });
+        fs.mount(
+          "/mnt/ro",
+          new OverlayFs({ mountPoint: "/", readOnly: true, root }),
+        );
+        const env = new Bash({ cwd: "/", fs, python: true });
 
-      const read = await env.exec(
-        `python3 -c "print(open('/mnt/ro/note.txt').read(), end='')"`,
-      );
-      expect(read.stdout).toBe("hello\n");
-      expect(read.exitCode).toBe(0);
+        const read = await env.exec(
+          `python3 -c "print(open('/mnt/ro/note.txt').read(), end='')"`,
+        );
+        expect(read.stdout).toBe("hello\n");
+        expect(read.exitCode).toBe(0);
 
-      const write = await env.exec(
-        `python3 -c "f = open('/mnt/ro/new.txt', 'w'); f.write('x'); f.close()"`,
-      );
-      expect(write.stderr).toContain(
-        "OSError: [Errno 69] Read-only file system: '/host/mnt/ro/new.txt'",
-      );
-      expect(write.exitCode).toBe(1);
-      expect(await fs.exists("/mnt/ro/new.txt")).toBe(false);
+        const write = await env.exec(
+          `python3 -c "f = open('/mnt/ro/new.txt', 'w'); f.write('x'); f.close()"`,
+        );
+        expect(write.stderr).toContain(
+          "OSError: [Errno 69] Read-only file system: '/host/mnt/ro/new.txt'",
+        );
+        expect(write.exitCode).toBe(1);
+        expect(await fs.exists("/mnt/ro/new.txt")).toBe(false);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
     });
   });
 

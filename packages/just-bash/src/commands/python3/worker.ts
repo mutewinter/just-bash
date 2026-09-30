@@ -193,6 +193,7 @@ interface EmscriptenNode {
 }
 
 interface EmscriptenStream {
+  fd: number;
   node: EmscriptenNode;
   flags: number;
   position: number;
@@ -268,6 +269,7 @@ interface EmscriptenStat {
 }
 
 interface EmscriptenFS {
+  closeStream: (fd: number) => void;
   isDir: (mode: number) => boolean;
   isFile: (mode: number) => boolean;
   isLink: (mode: number) => boolean;
@@ -530,59 +532,66 @@ function createHOSTFS(
 
     stream_ops: {
       open(stream: EmscriptenStream) {
-        const path = realPath(stream.node);
-        const flags = stream.flags;
-
-        const O_WRONLY = 1;
-        const O_RDWR = 2;
-        const O_CREAT = 64;
-        const O_TRUNC = 512;
-        const O_APPEND = 1024;
-
-        const accessMode = flags & 3;
-        const isWrite = accessMode === O_WRONLY || accessMode === O_RDWR;
-        const isCreate = (flags & O_CREAT) !== 0;
-        const isTruncate = (flags & O_TRUNC) !== 0;
-        const isAppend = (flags & O_APPEND) !== 0;
-
-        if (FS.isDir(stream.node.mode)) {
-          return;
-        }
-
-        let content: Uint8Array;
         try {
-          if (isTruncate && isWrite) {
-            content = new Uint8Array(0);
-          } else {
-            content = backend.readFile(path);
+          const path = realPath(stream.node);
+          const flags = stream.flags;
+
+          const O_WRONLY = 1;
+          const O_RDWR = 2;
+          const O_CREAT = 64;
+          const O_TRUNC = 512;
+          const O_APPEND = 1024;
+
+          const accessMode = flags & 3;
+          const isWrite = accessMode === O_WRONLY || accessMode === O_RDWR;
+          const isCreate = (flags & O_CREAT) !== 0;
+          const isTruncate = (flags & O_TRUNC) !== 0;
+          const isAppend = (flags & O_APPEND) !== 0;
+
+          if (FS.isDir(stream.node.mode)) {
+            return;
           }
-        } catch (e) {
-          // The bridge refuses a file its buffer cannot carry; that is a
-          // size limit, not a missing file, and it is checked before the
-          // create fallback: an append opens with O_CREAT, and treating the
-          // failed read as an empty file would write only the appended bytes
-          // back over the whole file on close.
-          const message = e instanceof Error ? e.message : String(e);
-          if (/too large/i.test(message)) {
+
+          let content: Uint8Array;
+          try {
+            if (isTruncate && isWrite) {
+              content = new Uint8Array(0);
+            } else {
+              content = backend.readFile(path);
+            }
+          } catch (e) {
+            // The bridge refuses a file its buffer cannot carry; that is a
+            // size limit, not a missing file, and it is checked before the
+            // create fallback: an append opens with O_CREAT, and treating the
+            // failed read as an empty file would write only the appended bytes
+            // back over the whole file on close.
+            const message = e instanceof Error ? e.message : String(e);
+            if (/too large/i.test(message)) {
+              throw new FS.ErrnoError(ERRNO_CODES.EFBIG);
+            }
+            if (isCreate && isWrite) {
+              content = new Uint8Array(0);
+            } else {
+              throw new FS.ErrnoError(ERRNO_CODES.ENOENT);
+            }
+          }
+
+          if (content.length > maxFileSize) {
             throw new FS.ErrnoError(ERRNO_CODES.EFBIG);
           }
-          if (isCreate && isWrite) {
-            content = new Uint8Array(0);
-          } else {
-            throw new FS.ErrnoError(ERRNO_CODES.ENOENT);
+
+          stream.hostContent = content;
+          stream.hostModified = isTruncate && isWrite;
+          stream.hostPath = path;
+
+          if (isAppend) {
+            stream.position = content.length;
           }
-        }
-
-        if (content.length > maxFileSize) {
-          throw new FS.ErrnoError(ERRNO_CODES.EFBIG);
-        }
-
-        stream.hostContent = content;
-        stream.hostModified = isTruncate && isWrite;
-        stream.hostPath = path;
-
-        if (isAppend) {
-          stream.position = content.length;
+        } catch (error) {
+          // FS.open allocates the descriptor before calling stream_ops.open
+          // and does not release it when initialization fails.
+          FS.closeStream(stream.fd);
+          throw error;
         }
       },
 

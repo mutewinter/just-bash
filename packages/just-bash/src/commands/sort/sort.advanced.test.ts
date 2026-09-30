@@ -2,6 +2,13 @@ import { describe, expect, it } from "vitest";
 import { Bash } from "../../Bash.js";
 
 describe("sort -h (human numeric)", () => {
+  it("reads suffixes followed by digits while preserving lowercase suffixes", async () => {
+    const env = new Bash({ files: { "/sizes": "1K2\n2\n1k2\n1e3\n" } });
+    const result = await env.exec("sort -sh /sizes");
+    expect(result.stdout).toBe("1e3\n2\n1K2\n1k2\n");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+  });
   it("should sort human readable sizes", async () => {
     const env = new Bash({
       files: { "/test.txt": "1K\n2M\n500\n1G\n100K\n" },

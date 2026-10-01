@@ -39,7 +39,9 @@ const MONTHS = new Map<string, number>([
  * are accepted, except exponent-like `e` followed by a digit (`1e3` is 1).
  */
 function parseHumanSize(s: string): number {
-  const match = s.trim().match(/^([+-]?\d*\.?\d+)([kmgtpKMGTPE]|e(?!\d))?/);
+  const match = s
+    .trim()
+    .match(/^([+-]?\d*\.?\d+)([kmgtpKMGTPE]|e(?![+-]?\d))?/);
   if (!match) return 0;
   const num = parseFloat(match[1]);
   const suffix = (match[2] || "").toLowerCase();

@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Bash } from "../../Bash.js";
 import { InMemoryFs } from "../../fs/in-memory-fs/in-memory-fs.js";
 import { MountableFs } from "../../fs/mountable-fs/mountable-fs.js";
@@ -167,6 +167,36 @@ EOF`);
   });
 
   describe("errors from the host filesystem", () => {
+    it("does not classify errors from words in filenames", async () => {
+      const fs = new InMemoryFs({
+        "/data/read-only-assets/item": "data",
+        "/data/too large.txt": "data",
+      });
+      const readFileBuffer = fs.readFileBuffer;
+      vi.spyOn(fs, "readFileBuffer").mockImplementation(async (path) => {
+        if (path === "/data/too large.txt") {
+          throw new Error(
+            "ENOENT: no such file or directory, open '/data/too large.txt'",
+          );
+        }
+        return readFileBuffer.call(fs, path);
+      });
+      const env = new Bash({ fs, python: true });
+      const result = await env.exec(`python3 <<'PY'
+import os
+try:
+    os.rmdir('/data/read-only-assets')
+except OSError as error:
+    print(error.errno)
+try:
+    open('/data/too large.txt').read()
+except OSError as error:
+    print(error.errno)
+PY`);
+      expect(result.stdout).toBe("55\n44\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
     it("releases descriptors after repeated caught oversized opens", async () => {
       const env = new Bash({
         python: true,

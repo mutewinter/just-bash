@@ -358,9 +358,15 @@ function createHOSTFS(
     try {
       return f();
     } catch (e: unknown) {
-      const msg =
-        (e as Error)?.message?.toLowerCase() ||
-        (typeof e === "string" ? e.toLowerCase() : "");
+      const message = e instanceof Error ? e.message : String(e);
+      const token = /^([A-Z][A-Z0-9]+):/.exec(message)?.[1];
+      if (token) {
+        throw new FS.ErrnoError(
+          ERRNO_CODES[token as keyof typeof ERRNO_CODES] ?? ERRNO_CODES.EIO,
+        );
+      }
+      // Paths follow the diagnostic's colon and must not select an errno.
+      const msg = message.split(":", 1)[0].toLowerCase();
       let code = ERRNO_CODES.EIO;
       if (msg.includes("no such file") || msg.includes("not found")) {
         code = ERRNO_CODES.ENOENT;
@@ -566,7 +572,7 @@ function createHOSTFS(
             // failed read as an empty file would write only the appended bytes
             // back over the whole file on close.
             const message = e instanceof Error ? e.message : String(e);
-            if (/too large/i.test(message)) {
+            if (/^Result too large: \d+ > \d+$/.test(message)) {
               throw new FS.ErrnoError(ERRNO_CODES.EFBIG);
             }
             if (isCreate && isWrite) {

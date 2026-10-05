@@ -82,11 +82,14 @@ function parseTimestampString(stamp: string, tz?: string): Date | null {
   const day = Number.parseInt(rest.slice(2, 4), 10);
   const hour = Number.parseInt(rest.slice(4, 6), 10);
   const minute = Number.parseInt(rest.slice(6, 8), 10);
-  const second = secondsPart ? Number.parseInt(secondsPart, 10) : 0;
+  // POSIX allows a leap second, `.60`, which lands on the next minute.
+  const leapSecond = secondsPart === "60";
+  const second =
+    secondsPart && !leapSecond ? Number.parseInt(secondsPart, 10) : 0;
 
   if (month < 1 || month > 12) return null;
   if (day < 1 || day > 31) return null;
-  if (hour > 23 || minute > 59 || second > 60) return null;
+  if (hour > 23 || minute > 59 || second > 59) return null;
 
   const pad = (n: number) => String(n).padStart(2, "0");
   const wall = `${String(year).padStart(4, "0")}-${pad(month)}-${pad(day)}T${pad(hour)}:${pad(minute)}:${pad(second)}`;
@@ -103,7 +106,7 @@ function parseTimestampString(stamp: string, tz?: string): Date | null {
   ) {
     return null;
   }
-  return date;
+  return leapSecond ? new Date(date.getTime() + 60_000) : date;
 }
 
 /**

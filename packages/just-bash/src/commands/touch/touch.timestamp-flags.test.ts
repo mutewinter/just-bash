@@ -53,6 +53,16 @@ describe("touch -t", () => {
     expect((await mtimeOf(bash, "/w/f.txt")).toISOString()).toBe(iso);
   });
 
+  it.each([
+    ["202001010000.60", "2020-01-01T00:01:00.000Z"],
+    ["202012312359.60", "2021-01-01T00:00:00.000Z"],
+  ])("carries a leap second in %s into the next minute", async (stamp, iso) => {
+    const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
+    const result = await bash.exec(`touch -t ${stamp} /w/f.txt`);
+    expect(result.exitCode).toBe(0);
+    expect((await mtimeOf(bash, "/w/f.txt")).toISOString()).toBe(iso);
+  });
+
   it("reads the stamp in $TZ when the shell sets one", async () => {
     const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
     const result = await bash.exec(

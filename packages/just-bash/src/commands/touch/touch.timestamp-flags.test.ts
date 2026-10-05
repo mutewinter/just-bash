@@ -22,8 +22,8 @@ import { currentYearInTimezone } from "../timezone.js";
  * components, or on agreement with `date`: a local-component assertion would
  * pass or fail depending on where the suite runs.
  *
- * Measured against GNU coreutils touch 9.2 with TZ set explicitly; the
- * whitespace and free-form cases against GNU coreutils 9.12.
+ * Measured against GNU coreutils touch 9.2 with TZ set explicitly; the POSIX
+ * TZ, leap-second, whitespace and free-form cases against GNU coreutils 9.12.
  */
 
 async function mtimeOf(bash: Bash, path: string): Promise<Date> {
@@ -39,6 +39,16 @@ describe("touch -t", () => {
   ])("stamps %s as UTC when the shell has no TZ", async (stamp, iso) => {
     const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
     const result = await bash.exec(`touch -t ${stamp} /w/f.txt`);
+    expect(result.exitCode).toBe(0);
+    expect((await mtimeOf(bash, "/w/f.txt")).toISOString()).toBe(iso);
+  });
+
+  it.each([
+    ["EST5", "202601020304", "2026-01-02T08:04:00.000Z"],
+    ["EST5EDT,M3.2.0,M11.1.0", "202607020304", "2026-07-02T07:04:00.000Z"],
+  ])("reads the stamp in a POSIX TZ=%s", async (tz, stamp, iso) => {
+    const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
+    const result = await bash.exec(`TZ='${tz}' touch -t ${stamp} /w/f.txt`);
     expect(result.exitCode).toBe(0);
     expect((await mtimeOf(bash, "/w/f.txt")).toISOString()).toBe(iso);
   });
@@ -196,6 +206,11 @@ describe("touch -d", () => {
     ["TZ=Asia/Tokyo", "Jan 1 2021 10:00", "2021-01-01T01:00:00.000Z"],
     ["TZ=Asia/Tokyo", "1 Jan 2021 10:00 EST", "2021-01-01T15:00:00.000Z"],
     ["TZ=Asia/Tokyo", " 2021-01-01 ", "2020-12-31T15:00:00.000Z"],
+    [
+      "TZ='EST5EDT,M3.2.0,M11.1.0'",
+      "2026-07-02 03:04",
+      "2026-07-02T07:04:00.000Z",
+    ],
   ])("reads %s -d '%s' in that zone", async (prefix, spelling, iso) => {
     const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
     const result = await bash.exec(`${prefix} touch -d '${spelling}' /w/f.txt`);

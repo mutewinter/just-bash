@@ -1,3 +1,5 @@
+import { resolveTimezoneAt } from "./posix-timezone.js";
+
 /**
  * Timezone-aware parsing shared by the commands that accept a date.
  *
@@ -26,8 +28,11 @@ export function isValidTimezone(tz: string): boolean {
  * Returns null if Intl rejects the timezone or produces an unparseable date.
  */
 function tzShownAsUtc(d: Date, tz: string): Date | null {
+  // A POSIX TZ string resolves to the fixed offset it has at this instant.
+  const zone = resolveTimezoneAt(tz, d.getTime());
+  if (zone === null) return null;
   const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
+    timeZone: zone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -104,9 +109,11 @@ export function currentYearInTimezone(
   now: Date = new Date(),
 ): number {
   if (!tz) return now.getUTCFullYear();
+  const zone = resolveTimezoneAt(tz, now.getTime());
+  if (zone === null) return now.getUTCFullYear();
   try {
     const year = new Intl.DateTimeFormat("en-US", {
-      timeZone: tz,
+      timeZone: zone,
       year: "numeric",
     }).format(now);
     return Number.parseInt(year, 10) || now.getUTCFullYear();

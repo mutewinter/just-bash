@@ -6,10 +6,10 @@ import type {
   RuntimeCommandContext,
 } from "../../types.js";
 import { unknownOption } from "../help.js";
+import { resolveTimezoneAt } from "../posix-timezone.js";
 import {
   currentYearInTimezone,
   hasExplicitZone,
-  isValidTimezone,
   parseBareISOInTimezone,
   parseZonelessInTimezone,
 } from "../timezone.js";
@@ -57,8 +57,8 @@ function parseDateString(dateStr: string, tz?: string): Date | null {
  * the shell has no `$TZ`: the host's calendar would otherwise decide it, and
  * the two disagree either side of a New Year boundary.
  *
- * The stamp names no zone, so it is read in `tz`, or in UTC when the shell has
- * no `$TZ`.
+ * The stamp names no zone, so it is read in `tz`, a zone Intl accepts or a
+ * POSIX TZ string, or in UTC when the shell has no `$TZ`.
  */
 function parseTimestampString(stamp: string, tz?: string): Date | null {
   const match = /^(\d{8}|\d{10}|\d{12})(?:\.(\d{2}))?$/.exec(stamp);
@@ -219,9 +219,10 @@ export const touchCommand: RuntimeCommand = {
 
     // Resolve whichever of -d, -t and -r was given last.
     // An unset or unresolvable $TZ leaves tz undefined, as it does in date:
-    // -t then reads in UTC and -d the way date -d does.
+    // -t then reads in UTC and -d the way date -d does. A POSIX TZ string
+    // such as EST5 counts as resolvable.
     let tz = ctx.env.get("TZ");
-    if (tz && !isValidTimezone(tz)) tz = undefined;
+    if (tz && resolveTimezoneAt(tz, Date.now()) === null) tz = undefined;
 
     let targetTime: Date | null = null;
     if (timeSource !== null) {

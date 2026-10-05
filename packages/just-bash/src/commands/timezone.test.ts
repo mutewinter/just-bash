@@ -27,6 +27,8 @@ describe("currentYearInTimezone", () => {
     ["Asia/Tokyo", 2026],
     ["Europe/London", 2025],
     ["America/Chicago", 2025],
+    ["<+14>-14", 2026],
+    ["EST5", 2025],
   ])("reads the year %s is in", (tz, year) => {
     expect(currentYearInTimezone(tz, NEW_YEARS_EVE)).toBe(year);
   });

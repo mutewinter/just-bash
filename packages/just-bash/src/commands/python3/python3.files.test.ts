@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -6,6 +6,7 @@ import { Bash } from "../../Bash.js";
 import { InMemoryFs } from "../../fs/in-memory-fs/in-memory-fs.js";
 import { MountableFs } from "../../fs/mountable-fs/mountable-fs.js";
 import { OverlayFs } from "../../fs/overlay-fs/overlay-fs.js";
+import { ReadWriteFs } from "../../fs/read-write-fs/read-write-fs.js";
 
 // Note: These tests use CPython Emscripten which loads ~9MB WASM on first run.
 // The first test will be slow, subsequent tests reuse the worker.
@@ -250,6 +251,28 @@ PY`);
       );
       expect(result.exitCode).toBe(1);
       expect(await env.fs.readFile("/tmp/big.log")).toBe(original);
+    });
+
+    it("refuses to append to a file over the backend's read limit rather than replace it", async () => {
+      // The backend reports its own size limit as `EFBIG: file too large`,
+      // which append mode's O_CREAT must not read as a missing file.
+      const root = await mkdtemp(join(tmpdir(), "python3-read-limit-"));
+      try {
+        const original = "x".repeat(2048);
+        await writeFile(join(root, "big.log"), original);
+        const fs = new ReadWriteFs({ root, maxFileReadSize: 1024 });
+        const env = new Bash({ cwd: "/", fs, python: true });
+        const result = await env.exec(
+          `python3 -c "f = open('/big.log', 'a'); f.write('tail'); f.close()"`,
+        );
+        expect(result.stderr).toContain(
+          "OSError: [Errno 22] File too large: '/host/big.log'",
+        );
+        expect(result.exitCode).toBe(1);
+        expect(await readFile(join(root, "big.log"), "utf8")).toBe(original);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
     });
 
     it("reports a write into a read-only mount as EROFS", async () => {

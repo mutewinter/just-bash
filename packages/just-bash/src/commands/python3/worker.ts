@@ -354,38 +354,39 @@ function createHOSTFS(
     return PATH.join(...parts);
   }
 
+  function errnoFor(e: unknown): number {
+    const message = e instanceof Error ? e.message : String(e);
+    const token = /^([A-Z][A-Z0-9]+):/.exec(message)?.[1];
+    if (token) {
+      return ERRNO_CODES[token as keyof typeof ERRNO_CODES] ?? ERRNO_CODES.EIO;
+    }
+    // Paths follow the diagnostic's colon and must not select an errno.
+    const msg = message.split(":", 1)[0].toLowerCase();
+    if (msg.includes("no such file") || msg.includes("not found")) {
+      return ERRNO_CODES.ENOENT;
+    } else if (msg.includes("is a directory")) {
+      return ERRNO_CODES.EISDIR;
+    } else if (msg.includes("not a directory")) {
+      return ERRNO_CODES.ENOTDIR;
+    } else if (msg.includes("already exists")) {
+      return ERRNO_CODES.EEXIST;
+    } else if (msg.includes("read-only") || msg.includes("erofs")) {
+      return ERRNO_CODES.EROFS;
+    } else if (msg.includes("permission")) {
+      return ERRNO_CODES.EACCES;
+    } else if (msg.includes("too large")) {
+      return ERRNO_CODES.EFBIG;
+    } else if (msg.includes("not empty")) {
+      return ERRNO_CODES.ENOTEMPTY;
+    }
+    return ERRNO_CODES.EIO;
+  }
+
   function tryFSOperation<T>(f: () => T): T {
     try {
       return f();
     } catch (e: unknown) {
-      const message = e instanceof Error ? e.message : String(e);
-      const token = /^([A-Z][A-Z0-9]+):/.exec(message)?.[1];
-      if (token) {
-        throw new FS.ErrnoError(
-          ERRNO_CODES[token as keyof typeof ERRNO_CODES] ?? ERRNO_CODES.EIO,
-        );
-      }
-      // Paths follow the diagnostic's colon and must not select an errno.
-      const msg = message.split(":", 1)[0].toLowerCase();
-      let code = ERRNO_CODES.EIO;
-      if (msg.includes("no such file") || msg.includes("not found")) {
-        code = ERRNO_CODES.ENOENT;
-      } else if (msg.includes("is a directory")) {
-        code = ERRNO_CODES.EISDIR;
-      } else if (msg.includes("not a directory")) {
-        code = ERRNO_CODES.ENOTDIR;
-      } else if (msg.includes("already exists")) {
-        code = ERRNO_CODES.EEXIST;
-      } else if (msg.includes("read-only") || msg.includes("erofs")) {
-        code = ERRNO_CODES.EROFS;
-      } else if (msg.includes("permission")) {
-        code = ERRNO_CODES.EACCES;
-      } else if (msg.includes("too large")) {
-        code = ERRNO_CODES.EFBIG;
-      } else if (msg.includes("not empty")) {
-        code = ERRNO_CODES.ENOTEMPTY;
-      }
-      throw new FS.ErrnoError(code);
+      throw new FS.ErrnoError(errnoFor(e));
     }
   }
 
@@ -566,19 +567,16 @@ function createHOSTFS(
               content = backend.readFile(path);
             }
           } catch (e) {
-            // The bridge refuses a file its buffer cannot carry; that is a
-            // size limit, not a missing file, and it is checked before the
-            // create fallback: an append opens with O_CREAT, and treating the
-            // failed read as an empty file would write only the appended bytes
-            // back over the whole file on close.
-            const message = e instanceof Error ? e.message : String(e);
-            if (/^Result too large: \d+ > \d+$/.test(message)) {
-              throw new FS.ErrnoError(ERRNO_CODES.EFBIG);
-            }
-            if (isCreate && isWrite) {
+            // Only a missing file may start empty. Any other failed read, such
+            // as the bridge or the backend refusing a file over its size
+            // limit, is reported as itself: an append opens with O_CREAT, and
+            // treating the failure as an empty file would write only the
+            // appended bytes back over the whole file on close.
+            const code = errnoFor(e);
+            if (code === ERRNO_CODES.ENOENT && isCreate && isWrite) {
               content = new Uint8Array(0);
             } else {
-              throw new FS.ErrnoError(ERRNO_CODES.ENOENT);
+              throw new FS.ErrnoError(code);
             }
           }
 

@@ -16,13 +16,14 @@ import { currentYearInTimezone } from "../timezone.js";
  * fixes for this format. With no year at all the stamp lands in the year the
  * shell's zone is currently in.
  *
- * Neither `-t` nor `-d` names a zone, so both are read in `$TZ`, or in UTC
- * when the shell has none. That is `date`'s contract, and it keeps the host's
- * own zone out of a timestamp nobody asked to be host-relative. Assertions
- * here are therefore on UTC components: a local-component assertion would
+ * Neither `-t` nor `-d` names a zone, so both are read in `$TZ` when the
+ * shell sets one. Without `$TZ`, `-t` is read in UTC and `-d` the way
+ * `date -d` reads the same spelling. Assertions here are therefore on UTC
+ * components, or on agreement with `date`: a local-component assertion would
  * pass or fail depending on where the suite runs.
  *
- * Measured against GNU coreutils touch 9.2 with TZ set explicitly.
+ * Measured against GNU coreutils touch 9.2 with TZ set explicitly; the
+ * whitespace and free-form cases against GNU coreutils 9.12.
  */
 
 async function mtimeOf(bash: Bash, path: string): Promise<Date> {
@@ -168,18 +169,36 @@ describe("touch -d", () => {
     );
   });
 
-  // A bare date already read as UTC. A spelling carrying a time did not: it
-  // reached `new Date`, which reads that as host-local, so the same script
-  // stamped a different instant on a machine in a different zone and
-  // disagreed with the identical `-t 202101011000`.
+  // Without $TZ a spelling carrying a time means whatever `date -d` takes it
+  // to mean, so a stamp written by one reads back the same in the other on
+  // any host.
   it.each([
-    ["2021-01-01 10:00:00", "2021-01-01T10:00:00.000Z"],
-    ["2021-01-01T10:00:00", "2021-01-01T10:00:00.000Z"],
-    ["2021-01-01T10:00:00.500", "2021-01-01T10:00:00.500Z"],
-    ["2021/01/01 10:00:00", "2021-01-01T10:00:00.000Z"],
-  ])("reads %s as UTC when the shell has no TZ", async (spelling, iso) => {
+    "2021-01-01 10:00:00",
+    "2021-01-01T10:00:00",
+    "2021-01-01T10:00:00.500",
+    "2021/01/01 10:00:00",
+  ])("reads %s as date -d does when the shell has no TZ", async (spelling) => {
     const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
     const result = await bash.exec(`touch -d '${spelling}' /w/f.txt`);
+    const date = await bash.exec(`date -d '${spelling}' +%s`);
+
+    expect(result.exitCode).toBe(0);
+    expect(date.exitCode).toBe(0);
+    expect(Math.floor((await mtimeOf(bash, "/w/f.txt")).getTime() / 1000)).toBe(
+      Number(date.stdout),
+    );
+  });
+
+  // Spellings outside the ISO grammar used to reach `new Date` with $TZ set,
+  // which read them in the host's zone instead.
+  it.each([
+    ["TZ=Asia/Tokyo", "2021-01-01T10:00:00.5000", "2021-01-01T01:00:00.500Z"],
+    ["TZ=Asia/Tokyo", "Jan 1 2021 10:00", "2021-01-01T01:00:00.000Z"],
+    ["TZ=Asia/Tokyo", "1 Jan 2021 10:00 EST", "2021-01-01T15:00:00.000Z"],
+    ["TZ=Asia/Tokyo", " 2021-01-01 ", "2020-12-31T15:00:00.000Z"],
+  ])("reads %s -d '%s' in that zone", async (prefix, spelling, iso) => {
+    const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
+    const result = await bash.exec(`${prefix} touch -d '${spelling}' /w/f.txt`);
 
     expect(result.exitCode).toBe(0);
     expect((await mtimeOf(bash, "/w/f.txt")).toISOString()).toBe(iso);

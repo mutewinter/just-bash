@@ -66,13 +66,16 @@ function tzShownAsUtc(d: Date, tz: string): Date | null {
  */
 export function parseBareISOInTimezone(s: string, tz: string): Date | null {
   const m = s.match(
-    /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?)?$/,
+    /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?)?$/,
   );
   if (!m) return null;
   const [, yr, mo, dy, hr = "00", mn = "00", sc = "00", frac] = m;
   // The zone shows whole seconds, so a fractional part would read as permanent
-  // drift and never converge. It is added back to the instant the loop settles.
-  const milliseconds = frac ? Number.parseInt(frac.padEnd(3, "0"), 10) : 0;
+  // drift and never converge. It is added back to the instant the loop settles,
+  // to the millisecond the filesystem keeps.
+  const milliseconds = frac
+    ? Number.parseInt(frac.slice(0, 3).padEnd(3, "0"), 10)
+    : 0;
   const requested = new Date(`${yr}-${mo}-${dy}T${hr}:${mn}:${sc}Z`);
   if (Number.isNaN(requested.getTime())) return null;
   try {
@@ -110,4 +113,31 @@ export function currentYearInTimezone(
   } catch {
     return now.getUTCFullYear();
   }
+}
+
+/**
+ * True when `s` names its own zone: a trailing `Z` or numeric offset, or one
+ * of the zone words the JS date parser honors (`UTC`, `GMT`, `EST`, ...).
+ * Such a spelling means one instant wherever it is read, so `$TZ` stays out.
+ */
+export function hasExplicitZone(s: string): boolean {
+  return (
+    /Z$/i.test(s) ||
+    /[+-]\d{2}:?\d{2}$/.test(s) ||
+    /(?:^|[^a-z])(?:ut|utc|gmt|[ecmp][sd]t)(?:$|[^a-z])/i.test(s)
+  );
+}
+
+/**
+ * Read a spelling that names no zone in `tz`. The ISO grammar above is tried
+ * first; anything else the JS date parser understands (`Jan 1 2021 10:00`) is
+ * read with ` UTC` appended, so its wall clock comes out without passing
+ * through the host's zone, and that wall clock is then resolved in `tz`.
+ */
+export function parseZonelessInTimezone(s: string, tz: string): Date | null {
+  const iso = parseBareISOInTimezone(s, tz);
+  if (iso) return iso;
+  const wall = new Date(`${s} UTC`);
+  if (Number.isNaN(wall.getTime())) return null;
+  return parseBareISOInTimezone(wall.toISOString().slice(0, -1), tz);
 }

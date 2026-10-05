@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { currentYearInTimezone, parseBareISOInTimezone } from "./timezone.js";
+import {
+  currentYearInTimezone,
+  hasExplicitZone,
+  parseBareISOInTimezone,
+  parseZonelessInTimezone,
+} from "./timezone.js";
 
 /**
  * The year a `touch -t MMDDhhmm` stamp lands in, and the instant a zone-less
@@ -56,5 +61,35 @@ describe("parseBareISOInTimezone", () => {
 
   it("returns null for a spelling outside the grammar", () => {
     expect(parseBareISOInTimezone("last tuesday", "UTC")).toBeNull();
+  });
+});
+
+describe("parseZonelessInTimezone", () => {
+  it.each([
+    ["2021-01-01T10:00:00.5000", "2021-01-01T01:00:00.500Z"],
+    ["Jan 1 2021 10:00", "2021-01-01T01:00:00.000Z"],
+    ["January 1, 2021 10:00:00", "2021-01-01T01:00:00.000Z"],
+  ])("reads %s in the zone", (spelling, iso) => {
+    expect(parseZonelessInTimezone(spelling, "Asia/Tokyo")?.toISOString()).toBe(
+      iso,
+    );
+  });
+
+  it("returns null for a spelling no parser reads", () => {
+    expect(parseZonelessInTimezone("last tuesday", "UTC")).toBeNull();
+  });
+});
+
+describe("hasExplicitZone", () => {
+  it.each([
+    ["2021-01-01T10:00:00Z", true],
+    ["2021-01-01T10:00:00+05:30", true],
+    ["1 Jan 2021 10:00 EST", true],
+    ["Jan 1 2021 10:00 GMT+0200", true],
+    ["Jan 1 2021 10:00", false],
+    ["2021-01-01 10:00:00", false],
+    ["Tuesday", false],
+  ])("reads %s as naming a zone: %s", (spelling, expected) => {
+    expect(hasExplicitZone(spelling)).toBe(expected);
   });
 });

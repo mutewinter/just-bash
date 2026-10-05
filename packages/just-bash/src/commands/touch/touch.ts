@@ -8,8 +8,10 @@ import type {
 import { unknownOption } from "../help.js";
 import {
   currentYearInTimezone,
+  hasExplicitZone,
   isValidTimezone,
   parseBareISOInTimezone,
+  parseZonelessInTimezone,
 } from "../timezone.js";
 
 /**
@@ -19,29 +21,25 @@ import {
  * - YYYY/MM/DD HH:MM:SS or YYYY-MM-DD HH:MM:SS
  * - ISO 8601 format
  *
- * A spelling that names no zone is read in `tz`, or in UTC when the shell has
- * no `$TZ`. That is the same contract `date -d` follows, so a stamp written
- * here reads back the same way there, and the host's own zone stays out of it.
+ * A spelling that names no zone is read in `tz` when the shell sets one,
+ * through the same `parseZonelessInTimezone` `date -d` uses, so a stamp
+ * written here reads back the same way there. Without `$TZ` it goes to
+ * `new Date`, as it does in `date -d`.
  */
 function parseDateString(dateStr: string, tz?: string): Date | null {
-  // Try common date formats
-  // Replace / with - for consistency
-  const normalized = dateStr.replace(/\//g, "-");
+  // Replace / with - for consistency, after trimming, since a leading space
+  // would otherwise keep the spelling out of the zone-aware grammar.
+  const normalized = dateStr.trim().replace(/\//g, "-");
 
-  // A spelling that names no zone is resolved in $TZ, or in UTC when there is
-  // none. Handing it to `new Date` instead would read a bare date as UTC but
-  // anything carrying a time as host-local, so the same stamp would mean a
-  // different instant on a different machine.
-  if (!/Z$/i.test(normalized) && !/[+-]\d{2}:?\d{2}$/.test(normalized)) {
-    const zoned = parseBareISOInTimezone(
-      normalized.replace(/\s+/, "T"),
-      tz ?? "UTC",
-    );
+  if (tz && !hasExplicitZone(normalized)) {
+    const zoned =
+      parseBareISOInTimezone(normalized.replace(/\s+/, "T"), tz) ??
+      parseZonelessInTimezone(normalized, tz);
     if (zoned) return zoned;
   }
 
-  // Anything else carries its own offset, or is a spelling outside the ISO
-  // grammar above.
+  // Anything else carries its own offset, the shell has no $TZ, or it is a
+  // spelling neither reading above understands.
   const date = new Date(normalized);
   if (!Number.isNaN(date.getTime())) {
     return date;
@@ -60,7 +58,7 @@ function parseDateString(dateStr: string, tz?: string): Date | null {
  * the two disagree either side of a New Year boundary.
  *
  * The stamp names no zone, so it is read in `tz`, or in UTC when the shell has
- * no `$TZ`, matching `-d`.
+ * no `$TZ`.
  */
 function parseTimestampString(stamp: string, tz?: string): Date | null {
   const match = /^(\d{8}|\d{10}|\d{12})(?:\.(\d{2}))?$/.exec(stamp);
@@ -220,9 +218,8 @@ export const touchCommand: RuntimeCommand = {
     }
 
     // Resolve whichever of -d, -t and -r was given last.
-    // An unset or unresolvable $TZ leaves tz undefined, which parses in UTC:
-    // the same contract date uses, and it keeps the host's zone out of a
-    // timestamp the caller did not ask to be host-relative.
+    // An unset or unresolvable $TZ leaves tz undefined, as it does in date:
+    // -t then reads in UTC and -d the way date -d does.
     let tz = ctx.env.get("TZ");
     if (tz && !isValidTimezone(tz)) tz = undefined;
 

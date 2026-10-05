@@ -572,3 +572,16 @@ describe("date strftime execution limits", () => {
     expect(result.stderr).toContain("strftime: output size limit exceeded");
   });
 });
+
+describe("date -d spellings outside the ISO grammar", () => {
+  // These reached `new Date` with $TZ set, which read them in the host's zone.
+  it.each([
+    ["Jan 1 2021 10:00", "1609462800"],
+    ["2021-01-01T10:00:00.5000", "1609462800"],
+  ])("reads %s in $TZ", async (spelling, epoch) => {
+    const env = new Bash();
+    const result = await env.exec(`TZ=Asia/Tokyo date -d '${spelling}' +%s`);
+    expect(result.stdout).toBe(`${epoch}\n`);
+    expect(result.exitCode).toBe(0);
+  });
+});

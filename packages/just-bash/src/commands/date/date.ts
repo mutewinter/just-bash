@@ -9,7 +9,11 @@ import type {
 } from "../../types.js";
 import { hasHelpFlag, showHelp, unknownOption } from "../help.js";
 import { formatStrftime } from "../printf/strftime.js";
-import { isValidTimezone, parseBareISOInTimezone } from "../timezone.js";
+import {
+  hasExplicitZone,
+  isValidTimezone,
+  parseZonelessInTimezone,
+} from "../timezone.js";
 
 const dateHelp = {
   name: "date",
@@ -39,9 +43,9 @@ function parseDate(s: string, tz?: string): Date | null {
   if (l === "now" || l === "today") return new Date();
   if (l === "yesterday") return new Date(Date.now() - 86400000);
   if (l === "tomorrow") return new Date(Date.now() + 86400000);
-  // For bare ISO strings (no explicit offset/Z), interpret in the requested timezone
-  if (tz && !/Z$/i.test(s) && !/[+-]\d{2}:?\d{2}$/.test(s)) {
-    const d = parseBareISOInTimezone(s, tz);
+  // A spelling that names no zone is interpreted in the requested timezone
+  if (tz && !hasExplicitZone(s)) {
+    const d = parseZonelessInTimezone(s, tz);
     if (d) return d;
   }
   const d = new Date(s);

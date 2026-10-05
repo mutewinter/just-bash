@@ -16,16 +16,38 @@ import type { RuntimeCommandContext } from "../../types.js";
 // to load, crashes, or exits early. The bridge here is the real one, so a run
 // that is not told the worker is gone waits out the whole script timeout.
 const mockState = vi.hoisted(() => ({
-  death: "exit" as "exit" | "error" | "construct",
+  death: "exit" as "exit" | "error" | "construct" | "mid-operation",
 }));
 
-vi.mock("node:worker_threads", () => {
+vi.mock("node:worker_threads", async () => {
+  const { OpCode, ProtocolBuffer, Status } = await import(
+    "../worker-bridge/protocol.js"
+  );
+
   class MockWorker {
     private handlers = new Map<string, Array<(payload?: unknown) => void>>();
 
-    constructor() {
+    constructor(
+      _path: string,
+      options: { workerData: { sharedBuffer: SharedArrayBuffer } },
+    ) {
       if (mockState.death === "construct") {
         throw new Error("Cannot find module worker.js");
+      }
+      if (mockState.death === "mid-operation") {
+        // Ask the bridge to read a file whose read never settles, then die
+        // while the bridge is still awaiting it.
+        const protocol = new ProtocolBuffer(options.workerData.sharedBuffer);
+        protocol.setOpCode(OpCode.READ_FILE);
+        protocol.setPath("/hangs");
+        protocol.setStatus(Status.READY);
+        protocol.notify();
+        setTimeout(() => {
+          for (const cb of this.handlers.get("error") ?? []) {
+            cb(new Error("worker crashed"));
+          }
+        }, 50);
+        return;
       }
       queueMicrotask(() => {
         const payload =
@@ -77,9 +99,9 @@ afterAll(() => {
   vi.resetModules();
 });
 
-function context(): RuntimeCommandContext {
+function context(fs = new InMemoryFs()): RuntimeCommandContext {
   return {
-    fs: new InMemoryFs(),
+    fs,
     cwd: "/home/user",
     env: new Map(),
     stdin: EMPTY_BYTES,
@@ -102,6 +124,26 @@ describe("python3 worker that dies before its bridge EXIT", () => {
         context(),
       );
       expect(result.exitCode).toBe(1);
+      expect(result.stderr).not.toContain("timeout");
+    },
+  );
+
+  it(
+    "fails at once when the worker dies during a bridge operation",
+    { timeout: 5_000 },
+    async () => {
+      mockState.death = "mid-operation";
+      const fs = new InMemoryFs();
+      const readFileBuffer = vi
+        .spyOn(fs, "readFileBuffer")
+        .mockReturnValue(new Promise(() => {}));
+      const result = await python3.python3Command.execute(
+        ["-c", "print(1)"],
+        context(fs),
+      );
+      expect(readFileBuffer).toHaveBeenCalledWith("/hangs");
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("worker crashed");
       expect(result.stderr).not.toContain("timeout");
     },
   );

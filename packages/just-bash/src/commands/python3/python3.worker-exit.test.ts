@@ -1,4 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { EMPTY_BYTES } from "../../encoding.js";
 import { InMemoryFs } from "../../fs/in-memory-fs/in-memory-fs.js";
 import { resolveLimits } from "../../limits.js";
@@ -54,7 +62,20 @@ vi.mock("node:worker_threads", () => {
   return { Worker: MockWorker };
 });
 
-import { _resetExecutionQueue, python3Command } from "./python3.js";
+// Test files share one module graph (isolate: false) and their vi.mock
+// registrations, so python3.js may already be loaded against another file's
+// mock worker and mock bridge. Load it afresh against this file's mock and the
+// real bridge, and leave nothing bound to this mock for the next file.
+let python3: typeof import("./python3.js");
+beforeAll(async () => {
+  vi.doUnmock("../worker-bridge/bridge-handler.js");
+  vi.doUnmock("../worker-bridge/protocol.js");
+  vi.resetModules();
+  python3 = await import("./python3.js");
+});
+afterAll(() => {
+  vi.resetModules();
+});
 
 function context(): RuntimeCommandContext {
   return {
@@ -68,7 +89,7 @@ function context(): RuntimeCommandContext {
 
 describe("python3 worker that dies before its bridge EXIT", () => {
   beforeEach(() => {
-    _resetExecutionQueue();
+    python3._resetExecutionQueue();
   });
 
   it.each(["exit", "error", "construct"] as const)(
@@ -76,7 +97,7 @@ describe("python3 worker that dies before its bridge EXIT", () => {
     { timeout: 5_000 },
     async (death) => {
       mockState.death = death;
-      const result = await python3Command.execute(
+      const result = await python3.python3Command.execute(
         ["-c", "print(1)"],
         context(),
       );

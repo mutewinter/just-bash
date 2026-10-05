@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { Bash } from "../../Bash.js";
 
+const manyFiles = (directory: string, count: number) =>
+  Object.fromEntries(
+    Array.from({ length: count }, (_, index) => [
+      `${directory}/f${index}.txt`,
+      "x",
+    ]),
+  );
+
 describe("js-exec fs operations", () => {
   describe("readFile", () => {
     it("should read a file", async () => {
@@ -215,6 +223,22 @@ describe("js-exec fs operations", () => {
       expect(result.exitCode).toBe(0);
     });
 
+    it.each([
+      ["entry", { maxTraversalEntries: 3 }],
+      ["work", { maxTraversalWork: 3 }],
+    ])("should charge withFileTypes against the traversal %s limit", async (kind, executionLimits) => {
+      const env = new Bash({
+        executionLimits,
+        files: manyFiles("/home/user/many", 5),
+        javascript: true,
+      });
+      const result = await env.exec(
+        `js-exec -c "try { console.log(fs.readdirSync('/home/user/many', { withFileTypes: true }).length) } catch (e) { console.log(e.message) }"`,
+      );
+      expect(result.stdout).toContain(`${kind} limit exceeded`);
+      expect(result.exitCode).toBe(0);
+    });
+
     it("should keep the path as given in a Dirent's parentPath", async () => {
       const env = new Bash({
         javascript: true,
@@ -279,6 +303,18 @@ describe("js-exec fs operations", () => {
       const env = new Bash({ javascript: true });
       const result = await env.exec(
         `js-exec -c "const e = new Error('boom'); e.code = 7; throw e"`,
+      );
+      expect(result.stderr).toBe("at <eval> (-c:1:20): boom\n");
+      expect(result.exitCode).toBe(1);
+    });
+
+    it.each([
+      "RUN_CUSTOM",
+      "RUN_TIMEOUT",
+    ])("should report a guest error whose code is %s as the guest's", async (code) => {
+      const env = new Bash({ javascript: true });
+      const result = await env.exec(
+        `js-exec -c "const e = new Error('boom'); e.code = '${code}'; throw e"`,
       );
       expect(result.stderr).toBe("at <eval> (-c:1:20): boom\n");
       expect(result.exitCode).toBe(1);

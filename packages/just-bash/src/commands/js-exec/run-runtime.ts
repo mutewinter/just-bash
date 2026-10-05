@@ -782,22 +782,26 @@ interface TypedDirent extends DirentEntry {
 
 /**
  * One listing with types, from the filesystem's own when it offers it and
- * from one lstat per entry otherwise, the latter under the traversal budget
- * so a large directory cannot outrun the limits inside a single bridge call.
+ * from one lstat per entry otherwise. Either way the entries are charged to
+ * the traversal budget, so a large directory cannot outrun the limits inside
+ * a single bridge call.
  */
 const readdirWithTypes = async (
   ctx: RuntimeCommandContext,
   path: string,
+  signal: AbortSignal,
 ): Promise<DirentEntry[]> => {
-  if (ctx.fs.readdirWithFileTypes !== undefined) {
-    return await ctx.fs.readdirWithFileTypes(path);
-  }
   const budget = new FileTraversalBudget({
     executionScope: ctx.executionScope,
     limits: ctx.limits,
-    signal: ctx.signal,
+    signal,
     site: "js-exec",
   });
+  if (ctx.fs.readdirWithFileTypes !== undefined) {
+    const entries = await ctx.fs.readdirWithFileTypes(path);
+    budget.discover(entries.length);
+    return entries;
+  }
   const names = await ctx.fs.readdir(path);
   budget.discover(names.length);
   const entries: DirentEntry[] = [];
@@ -1073,11 +1077,15 @@ async function executeWithRunInner(
             attempt(async () => {
               const resolved = resolve(path);
               if (!withTypes) return await ctx.fs.readdir(resolved);
+              // The run's own signal, which js-exec's timeout aborts too.
+              const { abortSignal } = getHostFunctionContext();
               if (!recursive) {
-                return (await readdirWithTypes(ctx, resolved)).map((entry) => ({
-                  ...entry,
-                  dir: "",
-                }));
+                return (await readdirWithTypes(ctx, resolved, abortSignal)).map(
+                  (entry) => ({
+                    ...entry,
+                    dir: "",
+                  }),
+                );
               }
               // The listed directory is followed if it is a symlink, as
               // node follows it; symlinks met below it are listed and not
@@ -1094,7 +1102,7 @@ async function executeWithRunInner(
                   fs: ctx.fs,
                   limits: ctx.limits,
                   root,
-                  signal: ctx.signal,
+                  signal: abortSignal,
                   site: "js-exec",
                   symlinks: "never",
                 },
@@ -1432,12 +1440,16 @@ ${bootstrap}
       );
     } else {
       output.exitCode = 1;
-      // run carries a guest error's own `code` (an fs error's ENOENT, say)
-      // onto the RunError, so anything outside run's own RUN_* codes is the
-      // guest's.
+      // Provenance comes from run, not from the guest: run drops a guest
+      // error's `code` in the RUN_ namespace (other than RUN_ERROR) before
+      // the error leaves the worker, while its own failures always carry a
+      // RUN_* code. So RUN_ERROR, or a string code outside RUN_ (an fs
+      // error's ENOENT, say), is the guest's; anything else, an absent or
+      // non-string code included, stays on the host sanitizer.
       const isGuestError =
         RunError.isInstance(error) &&
-        (error.code === "RUN_ERROR" || !String(error.code).startsWith("RUN_"));
+        typeof error.code === "string" &&
+        (error.code === "RUN_ERROR" || !error.code.startsWith("RUN_"));
       const guestMessage = isGuestError
         ? formatGuestError(error, options, sourceLineOffset)
         : sanitizeHostErrorMessage(message);

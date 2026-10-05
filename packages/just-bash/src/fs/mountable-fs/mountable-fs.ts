@@ -1,4 +1,5 @@
 import { type ByteString, readBytesFrom } from "../../encoding.js";
+import { rethrowFatalExecutionError } from "../../fatal-execution-error.js";
 import { InMemoryFs } from "../in-memory-fs/in-memory-fs.js";
 import type {
   BufferEncoding,
@@ -701,6 +702,9 @@ export class MountableFs implements IFileSystem {
             failures,
           );
         } catch (error) {
+          // A limit, an abort, or a security violation ends the copy rather
+          // than being recorded as one entry that could not be copied.
+          rethrowFatalExecutionError(error);
           const message =
             error instanceof Error ? error.message : String(error);
           const entry = childStat?.isDirectory

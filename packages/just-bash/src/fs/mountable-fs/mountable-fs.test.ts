@@ -1,4 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { Bash } from "../../Bash.js";
+import {
+  ExecutionAbortedError,
+  ExecutionLimitError,
+} from "../../interpreter/errors.js";
 import { InMemoryFs } from "../in-memory-fs/in-memory-fs.js";
 import { MountableFs } from "./mountable-fs.js";
 
@@ -430,6 +435,76 @@ describe("MountableFs", () => {
 
       expect(await mount2.readFile("/dir/a.txt")).toBe("a");
       expect(await mount2.readFile("/dir/sub")).toBe("in the way");
+    });
+
+    it.each([
+      ["a limit", new ExecutionLimitError("limit", "iterations")],
+      ["an abort", new ExecutionAbortedError()],
+    ])("should stop at %s rather than record it as a failed entry", async (_reason, fatal) => {
+      const mount1 = new InMemoryFs();
+      await mount1.mkdir("/dir");
+      await mount1.writeFile("/dir/a.txt", "a");
+      await mount1.writeFile("/dir/b.txt", "b");
+      await mount1.writeFile("/dir/c.txt", "c");
+
+      class FatalOnB extends InMemoryFs {
+        override async writeFile(
+          ...args: Parameters<InMemoryFs["writeFile"]>
+        ): Promise<void> {
+          const [path] = args;
+          if (path === "/dir/b.txt") throw fatal;
+          return super.writeFile(...args);
+        }
+      }
+      const mount2 = new FatalOnB();
+      const fs = new MountableFs();
+      fs.mount("/mnt/a", mount1);
+      fs.mount("/mnt/b", mount2);
+
+      const error = await fs
+        .cp("/mnt/a/dir", "/mnt/b/dir", { recursive: true })
+        .catch((value: unknown) => value);
+
+      expect(error).toBe(fatal);
+      expect(await mount2.exists("/dir/a.txt")).toBe(true);
+      expect(await mount2.exists("/dir/c.txt")).toBe(false);
+    });
+
+    // OverlayFs and ReadWriteFs raise ENOENT from several gates for a single
+    // entry; one among the failures must not read as the source being missing.
+    it.each([
+      ["cp -r", "cp"],
+      ["mv", "mv"],
+    ])("should not report the source as missing from %s when one failed entry is ENOENT", async (command, name) => {
+      const mount1 = new InMemoryFs();
+      await mount1.mkdir("/dir");
+      await mount1.writeFile("/dir/a.txt", "a");
+      await mount1.writeFile("/dir/gone.txt", "g");
+
+      class MissingOnGone extends InMemoryFs {
+        override async writeFile(
+          ...args: Parameters<InMemoryFs["writeFile"]>
+        ): Promise<void> {
+          const [path] = args;
+          if (path === "/dir/gone.txt") {
+            throw new Error(
+              `ENOENT: no such file or directory, open '${path}'`,
+            );
+          }
+          return super.writeFile(...args);
+        }
+      }
+      const fs = new MountableFs();
+      fs.mount("/mnt/a", mount1);
+      fs.mount("/mnt/b", new MissingOnGone());
+      const bash = new Bash({ fs });
+
+      const result = await bash.exec(`${command} /mnt/a/dir /mnt/b/dir`);
+
+      expect(result.stderr).toBe(
+        `${name}: cannot ${name === "cp" ? "copy" : "move"} '/mnt/a/dir': copied all but 1 entry: /mnt/a/dir/gone.txt: ENOENT: no such file or directory, open '/dir/gone.txt'\n`,
+      );
+      expect(result.exitCode).toBe(1);
     });
   });
 

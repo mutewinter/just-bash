@@ -21,7 +21,7 @@ raise KeyError(2)"`);
     },
   );
 
-  it("names a script file by its path and its own lines", async () => {
+  it("names a script file by its absolute path and its own lines", async () => {
     const env = new Bash({ python: true });
     await env.exec(`cat > /tmp/report.py << 'EOF'
 def fail():
@@ -34,10 +34,10 @@ EOF`);
     expect(result.stderr).toBe(
       [
         "Traceback (most recent call last):",
-        '  File "report.py", line 4, in <module>',
+        '  File "/tmp/report.py", line 4, in <module>',
         "    fail()",
         "    ~~~~^^",
-        '  File "report.py", line 2, in fail',
+        '  File "/tmp/report.py", line 2, in fail',
         '    raise ValueError("boom")',
         "ValueError: boom",
         "",
@@ -59,6 +59,97 @@ EOF`);
     expect(result.stderr).toBe("");
     expect(result.stdout).toBe("/tmp/app/main.py __main__ 42\n");
     expect(result.exitCode).toBe(0);
+  });
+
+  it("finds a relative script's source after the program changes directory", async () => {
+    const env = new Bash({ python: true });
+    await env.exec(`cat > /tmp/moves.py << 'EOF'
+import os
+os.chdir('/')
+raise ValueError("moved")
+EOF`);
+    const result = await env.exec("cd /tmp && python3 moves.py");
+    expect(result.stderr).toBe(
+      [
+        "Traceback (most recent call last):",
+        '  File "/tmp/moves.py", line 3, in <module>',
+        '    raise ValueError("moved")',
+        "ValueError: moved",
+        "",
+      ].join("\n"),
+    );
+    expect(result.exitCode).toBe(1);
+  });
+
+  it("makes a script's path absolute when the shell is at the root", async () => {
+    const env = new Bash({ python: true });
+    await env.exec(
+      "echo 'import sys; print(__file__, sys.path[0])' > /rooted.py",
+    );
+    const result = await env.exec("cd / && python3 rooted.py");
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("/rooted.py /\n");
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("sets __file__ to <stdin> for a program read from stdin", async () => {
+    const env = new Bash({ python: true });
+    const dash = await env.exec(`python3 - << 'EOF'
+print(__file__)
+EOF`);
+    expect(dash.stderr).toBe("");
+    expect(dash.stdout).toBe("<stdin>\n");
+    const piped = await env.exec(`echo 'print(__file__)' | python3`);
+    expect(piped.stderr).toBe("");
+    expect(piped.stdout).toBe("<stdin>\n");
+  });
+
+  it("names modules imported beside the program by their own paths", async () => {
+    const env = new Bash({ python: true });
+    await env.exec(
+      "mkdir -p /tmp/lib/pkg && touch /tmp/lib/pkg/__init__.py && echo 'X = 1' > /tmp/lib/pkg/mod.py",
+    );
+    await env.exec(`cat > /tmp/lib/helper.py << 'EOF'
+def fail():
+    raise ValueError("boom")
+EOF`);
+    await env.exec(`cat > /tmp/lib/main.py << 'EOF'
+import helper, pkg.mod
+print(helper.__file__, pkg.mod.__file__, list(pkg.__path__))
+helper.fail()
+EOF`);
+    const script = await env.exec("python3 /tmp/lib/main.py");
+    expect(script.stdout).toBe(
+      "/tmp/lib/helper.py /tmp/lib/pkg/mod.py ['/tmp/lib/pkg']\n",
+    );
+    expect(script.stderr).toContain(
+      'File "/tmp/lib/helper.py", line 2, in fail',
+    );
+    expect(script.stderr).not.toContain("/host");
+    const inline = await env.exec(
+      `cd /tmp/lib && python3 -c "import helper; print(helper.__file__)"`,
+    );
+    expect(inline.stderr).toBe("");
+    expect(inline.stdout).toBe("/tmp/lib/helper.py\n");
+  });
+
+  it("formats an exception with the standard traceback module, not one beside the program", async () => {
+    const env = new Bash({ python: true });
+    await env.exec(`mkdir -p /tmp/shadow && cat > /tmp/shadow/traceback.py << 'EOF'
+print("hijacked")
+def print_exception(*args, **kwargs):
+    pass
+EOF`);
+    await env.exec("echo '1/0' > /tmp/shadow/main.py");
+    for (const command of [
+      `cd /tmp/shadow && python3 -c "1/0"`,
+      "python3 /tmp/shadow/main.py",
+    ]) {
+      const result = await env.exec(command);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("ZeroDivisionError: division by zero");
+      expect(result.exitCode).toBe(1);
+    }
   });
 
   it("prints a syntax error the way CPython does, naming no wrapper", async () => {

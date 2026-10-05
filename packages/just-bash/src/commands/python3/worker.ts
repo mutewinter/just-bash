@@ -11,7 +11,7 @@
  */
 
 import { createRequire } from "node:module";
-import { dirname } from "node:path";
+import { dirname, posix } from "node:path";
 import { parentPort, workerData } from "node:worker_threads";
 import { sanitizeHostErrorMessage } from "../../fs/sanitize-error.js";
 import {
@@ -1431,33 +1431,88 @@ async function runPython(input: WorkerInput): Promise<WorkerOutput> {
   // script and its own line numbers, the wrapper's helpers stay out of its
   // globals, sys.modules['__main__'] is the program (pickle, unittest.main
   // and doctest all look it up there), and sys.path[0] and __file__ are what
-  // CPython would set. The source is compiled as the str it already is: the
-  // filesystem decoded it as UTF-8, and a coding cookie in a str is accepted
-  // and ignored, where compiling bytes would re-decode UTF-8 text under
-  // whatever the cookie names. JSON escapes are a subset of Python string
-  // escapes, so JSON.stringify yields a valid Python literal.
-  const isScriptFile =
-    input.source === "file" && input.scriptPath !== undefined;
-  const fileName = isScriptFile
-    ? input.scriptPath
-    : input.source === "stdin"
-      ? "<stdin>"
-      : "<string>";
+  // CPython would set: a script by its absolute logical path, stdin as
+  // `<stdin>`. The source reaches compile() as the str it already is, read
+  // from its own MEMFS file rather than escaped into this wrapper, which
+  // would multiply its size: the filesystem decoded it as UTF-8, and a coding
+  // cookie in a str is accepted and ignored, where compiling bytes would
+  // re-decode UTF-8 text under whatever the cookie names.
+  const mainFile =
+    input.source === "file" && input.scriptPath !== undefined
+      ? posix.resolve(input.cwd, input.scriptPath)
+      : undefined;
+  const fileName =
+    mainFile ?? (input.source === "stdin" ? "<stdin>" : "<string>");
+  const programPath = "/tmp/_jb_program.py";
   const programCode = `
 import types as _jb_types
+import importlib.machinery as _jb_machinery
+
+# Imports beside the program resolve through /host but are named by their
+# logical paths, as the program itself is, so a module's __file__ and its
+# traceback frames name a path the shell can open.
+def _jb_logical(path):
+    return path[5:] or '/'
+
+class _jb_HostPaths:
+    def get_data(self, path):
+        return super().get_data('/host' + path)
+    def path_stats(self, path):
+        return super().path_stats('/host' + path)
+    def set_data(self, path, data, **kwargs):
+        return super().set_data('/host' + path, data, **kwargs)
+
+class _jb_HostSourceLoader(_jb_HostPaths, _jb_machinery.SourceFileLoader):
+    pass
+
+class _jb_HostSourcelessLoader(_jb_HostPaths, _jb_machinery.SourcelessFileLoader):
+    pass
+
+class _jb_HostFinder(_jb_machinery.FileFinder):
+    def _get_spec(self, loader_class, fullname, path, smsl, target):
+        if smsl is not None:
+            smsl = [_jb_logical(p) for p in smsl]
+        return super()._get_spec(loader_class, fullname, _jb_logical(path), smsl, target)
+    def find_spec(self, fullname, target=None):
+        spec = super().find_spec(fullname, target)
+        if spec is not None and spec.loader is None and spec.submodule_search_locations:
+            spec.submodule_search_locations = [_jb_logical(p) for p in spec.submodule_search_locations]
+        return spec
+
+def _jb_host_path_hook(entry):
+    if entry == '/host' or entry.startswith('/host/'):
+        host = entry
+    elif _should_redirect(entry):
+        host = '/host' + entry
+    else:
+        raise ImportError('not a just-bash path')
+    if not os.path.isdir(host):
+        raise ImportError('only directories are supported')
+    return _jb_HostFinder(
+        host,
+        (_jb_HostSourceLoader, _jb_machinery.SOURCE_SUFFIXES),
+        (_jb_HostSourcelessLoader, _jb_machinery.BYTECODE_SUFFIXES),
+    )
+
+sys.path_hooks.insert(0, _jb_host_path_hook)
 _jb_main = _jb_types.ModuleType('__main__')
-if ${isScriptFile ? "True" : "False"}:
-    _jb_main.__file__ = os.path.abspath(${JSON.stringify(fileName)})
-    sys.path.insert(0, '/host' + os.path.dirname(_jb_main.__file__))
-else:
-    sys.path.insert(0, '')
+${fileName === "<string>" ? "" : `_jb_main.__file__ = ${JSON.stringify(fileName)}`}
+# sys.path[0] is this wrapper's MEMFS directory; the program's takes its place.
+sys.path_importer_cache.pop(sys.path[0], None)
+sys.path[0] = ${mainFile === undefined ? "''" : JSON.stringify(posix.dirname(mainFile))}
 sys.modules['__main__'] = _jb_main
-_jb_code = compile(${JSON.stringify(input.pythonCode)}, ${JSON.stringify(fileName)}, 'exec')
-del _jb_types
+with _orig_open(${JSON.stringify(programPath)}, encoding='utf-8', newline='') as _jb_file:
+    _jb_code = compile(_jb_file.read(), ${JSON.stringify(fileName)}, 'exec')
+del _jb_types, _jb_file
 exec(_jb_code, _jb_main.__dict__)
 `;
+  // The traceback module is imported, and sys.path saved, before the
+  // program's directory goes on sys.path, so a traceback.py (or any module the
+  // formatter imports lazily) beside the program cannot replace the formatter.
   const wrappedCode = `
 import sys
+import traceback as _jb_traceback
+_jb_sys_path = list(sys.path)
 _jb_exit_code = 0
 try:
 ${setupCode
@@ -1481,12 +1536,12 @@ except SystemExit as e:
         print(e.code, file=sys.stderr)
         _jb_exit_code = 1
 except Exception as e:
-    import traceback
+    sys.path = _jb_sys_path
     # The outermost frame is this wrapper's; the program's frames follow it.
     # A compile-time error has no program frame at all, and prints as CPython
     # prints a SyntaxError, from the exception alone.
     _jb_tb = e.__traceback__
-    traceback.print_exception(type(e), e, None if _jb_tb is None else _jb_tb.tb_next)
+    _jb_traceback.print_exception(type(e), e, None if _jb_tb is None else _jb_tb.tb_next)
     _jb_exit_code = 1
 sys.exit(_jb_exit_code)
 `;
@@ -1504,6 +1559,7 @@ sys.exit(_jb_exit_code)
 
   // Write script to Emscripten FS (MEMFS)
   Module.FS.writeFile(scriptPath, scriptData);
+  Module.FS.writeFile(programPath, encoder.encode(input.pythonCode));
 
   // Execute CPython with the script
   try {

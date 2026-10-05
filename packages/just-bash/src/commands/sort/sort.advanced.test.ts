@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Bash } from "../../Bash.js";
 
 describe("sort -h (human numeric)", () => {
-  it("reads suffixes followed by digits while preserving lowercase suffixes", async () => {
+  it("reads suffixes followed by digits, including lowercase k", async () => {
     const env = new Bash({
       files: { "/sizes": "1K2\n2\n1k2\n1e3\n1e+3\n1e-3\n" },
     });
@@ -20,13 +20,28 @@ describe("sort -h (human numeric)", () => {
     expect(result.exitCode).toBe(0);
   });
 
-  it("should handle mixed case suffixes", async () => {
+  it("should honor only k and uppercase suffixes, matching GNU sort", async () => {
+    // GNU sort reads lowercase m, g, t, p and e as plain text, so 3g is 3.
     const env = new Bash({
       files: { "/test.txt": "1k\n2M\n3g\n" },
     });
     const result = await env.exec("sort -h /test.txt");
-    expect(result.stdout).toBe("1k\n2M\n3g\n");
+    expect(result.stdout).toBe("3g\n1k\n2M\n");
     expect(result.exitCode).toBe(0);
+  });
+
+  it("should not multiply a number by a lowercase letter that starts text", async () => {
+    // Expected order taken from GNU coreutils 9.12 on the same input.
+    const env = new Bash({
+      files: {
+        "/test.txt":
+          "2gb-archive.tar\n100kb-note.txt\n5m ago\n30s ago\n1mfoo\n2K\n3t\n4p\n6e\n",
+      },
+    });
+    const result = await env.exec("sort -h /test.txt");
+    expect(result.stdout).toBe(
+      "1mfoo\n2gb-archive.tar\n3t\n4p\n5m ago\n6e\n30s ago\n2K\n100kb-note.txt\n",
+    );
   });
 
   it("should sort with decimal values", async () => {

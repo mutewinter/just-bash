@@ -35,13 +35,12 @@ const MONTHS = new Map<string, number>([
  * is the whole line, so `du -h` output reaches here as `872M\t./dir`.
  *
  * The suffix has to touch the number, so the first letter of a following
- * word is not read as one (`10 mangoes` is 10, not 10M). Lowercase suffixes
- * are accepted, except exponent-like `e` followed by a digit (`1e3` is 1).
+ * word is not read as one (`10 mangoes` is 10, not 10M). Only `k` and the
+ * uppercase letters are suffixes, as in GNU sort, so `2gb-archive`, `5m ago`
+ * and `1e3` read as 2, 5 and 1.
  */
 function parseHumanSize(s: string): number {
-  const match = s
-    .trim()
-    .match(/^([+-]?\d*\.?\d+)([kmgtpKMGTPE]|e(?![+-]?\d))?/);
+  const match = s.trim().match(/^([+-]?\d*\.?\d+)([kKMGTPE])?/);
   if (!match) return 0;
   const num = parseFloat(match[1]);
   const suffix = (match[2] || "").toLowerCase();

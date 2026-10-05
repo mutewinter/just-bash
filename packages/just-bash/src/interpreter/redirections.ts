@@ -547,6 +547,8 @@ async function prepareRedirectionsWithState(
         if (capacityError) return capacityError;
         rememberFd(ctx, snapshot, effectiveFd);
         setFdEntry(ctx, effectiveFd, { kind: "input", content });
+        listEntries.delete(effectiveFd);
+        rebound(effectiveFd);
       } else if (effectiveFd === 0 || effectiveFd === null) {
         stdin = latin1FromBytes(encodeUtf8ToBytes(content));
         stdinSourceFd = -1;
@@ -614,6 +616,8 @@ async function prepareRedirectionsWithState(
         if (!Number.isNaN(existingFd)) {
           rememberFd(ctx, transaction.fdVariableSnapshot, existingFd);
           closeFd(ctx, existingFd);
+          listEntries.delete(existingFd);
+          rebound(existingFd);
         }
         continue;
       }
@@ -960,7 +964,11 @@ async function prepareRedirectionsWithState(
         transaction.policy === "persistent" &&
         effectiveFd !== null &&
         effectiveFd < FIRST_USER_FD &&
-        parsed.sourceFd >= FIRST_USER_FD
+        parsed.sourceFd !== effectiveFd &&
+        // A standard fd the table holds is an open like any other: `exec >f
+        // 2>&1` puts fd 2 on fd 1's open, in its alias group, so a later
+        // result carrying both streams is merged onto it in write order.
+        (parsed.sourceFd >= FIRST_USER_FD || isFdOpen(ctx, parsed.sourceFd))
       ) {
         if (!dupFd(ctx, effectiveFd, parsed.sourceFd)) {
           return fail(
@@ -972,6 +980,7 @@ async function prepareRedirectionsWithState(
             index,
           );
         }
+        rebound(effectiveFd);
         standardRoutes.set(
           effectiveFd,
           getFdEntry(ctx, effectiveFd) as FdEntry,
@@ -1022,6 +1031,8 @@ async function prepareRedirectionsWithState(
       if (parsed.move) {
         if (parsed.sourceFd >= FIRST_USER_FD) {
           closeFd(ctx, parsed.sourceFd);
+          listEntries.delete(parsed.sourceFd);
+          rebound(parsed.sourceFd);
         } else {
           rebound(parsed.sourceFd);
           standardRoutes.set(parsed.sourceFd, { kind: "closed" });

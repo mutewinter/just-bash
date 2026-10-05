@@ -859,13 +859,19 @@ export class Bash {
       } catch (error) {
         // ExitError propagates from 'exit' builtin (including via eval/source)
         if (error instanceof ExitError) {
-          return finishResult({
+          const exited: BashExecResult = {
             stdout: error.stdout,
             stderr: error.stderr,
             exitCode: error.exitCode,
             internalOutputAccounting: error.internalOutputAccounting,
             env: mapToRecordWithExtras(this.state.env, effectiveOptions.env),
-          });
+          };
+          // A nested shell's result goes on to its caller's redirections,
+          // which merge a duplication along the order the script wrote in.
+          if (error.outputChunks?.length) {
+            exited.internalOutputChunks = error.outputChunks;
+          }
+          return finishResult(exited);
         }
         // PosixFatalError propagates from special builtins in POSIX mode
         if (error instanceof PosixFatalError) {

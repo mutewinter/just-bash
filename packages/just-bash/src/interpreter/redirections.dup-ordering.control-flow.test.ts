@@ -137,6 +137,54 @@ describe("fd duplication ordering through control flow", () => {
 });
 
 /**
+ * A sourced file, an executable script, and a nested shell each turn the
+ * control-flow error that ends them into an ordinary result, and an errexit
+ * that ends a script is folded into its output the same way. Each of those
+ * conversions has to keep the order the error carried out.
+ */
+describe("fd duplication ordering across script boundaries", () => {
+  const BODY = "echo O1\necho E1 1>&2\necho O2\n";
+  const run = (script: string) =>
+    new Bash({
+      files: {
+        "/returns": `${BODY}return 0\n`,
+        "/exits": `#!/bin/bash\n${BODY}exit 0\n`,
+      },
+    }).exec(`chmod +x /exits; ${script}`);
+
+  it.each([
+    ["a sourced file that returns", ". /returns 2>&1"],
+    ["a sourced file that returns, in a group", "{ . /returns; } 2>&1"],
+    [
+      "a sourced file that returns, in a function",
+      "f() { . /returns; }; f 2>&1",
+    ],
+    ["an executable script that exits", "/exits 2>&1"],
+    ["an executable script that exits, in a group", "{ /exits; } 2>&1"],
+    [
+      "a nested shell that exits",
+      "bash -c 'echo O1; echo E1 1>&2; echo O2; exit' 2>&1",
+    ],
+    [
+      "a nested shell that exits into a |& pipe",
+      "bash -c 'echo O1; echo E1 1>&2; echo O2; exit' |& cat",
+    ],
+    [
+      "a nested shell that errexit ends",
+      "bash -c 'set -e; echo O1 && echo E1 1>&2 && echo O2 && false' 2>&1",
+    ],
+    [
+      "an eval script that errexit ends",
+      "eval 'set -e; echo O1 && echo E1 1>&2 && echo O2 && false' 2>&1",
+    ],
+  ])("keeps the order of %s", async (_, script) => {
+    const result = await run(script);
+    expect(result.stdout).toBe("O1\nE1\nO2\n");
+    expect(result.stderr).toBe("");
+  });
+});
+
+/**
  * A pipe carries whatever its write end is given. `|&` puts both streams on
  * that end, so the reading stage sees them in the order they were written.
  */

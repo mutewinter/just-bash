@@ -342,7 +342,11 @@ export async function executeUserScript(
     // Executable scripts run in a subshell-like environment, so exit only
     // ends the script and returns its status to the surrounding command list.
     if (error instanceof ExitError) {
-      return result(error.stdout, error.stderr, error.exitCode);
+      const exited = result(error.stdout, error.stderr, error.exitCode);
+      if (error.outputChunks?.length) {
+        exited.internalOutputChunks = error.outputChunks;
+      }
+      return exited;
     }
 
     // ExecutionLimitError must always propagate

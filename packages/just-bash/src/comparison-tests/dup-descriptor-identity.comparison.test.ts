@@ -91,4 +91,54 @@ describe("duplication descriptor identity - Real Bash Comparison", () => {
       "{ echo O1; echo E1 >&2; echo O2; exit 3; } 2>&1 | cat",
     );
   });
+
+  it("a sourced file that returns keeps its write order through a duplication", async () => {
+    const env = await setupFiles(testDir, {
+      s: "echo O1\necho E1 >&2\necho O2\nreturn\n",
+    });
+    await compareOutputs(env, testDir, ". ./s 2>&1");
+  });
+
+  it("an executable script that exits keeps its write order through a duplication", async () => {
+    const env = await setupFiles(testDir, {
+      x: "#!/bin/bash\necho O1\necho E1 >&2\necho O2\nexit\n",
+    });
+    await compareOutputs(env, testDir, "chmod +x x; ./x 2>&1");
+  });
+
+  it("a nested shell that exits keeps its write order through a duplication", async () => {
+    const env = await setupFiles(testDir, {});
+    await compareOutputs(
+      env,
+      testDir,
+      "bash -c 'echo O1; echo E1 >&2; echo O2; exit' 2>&1",
+    );
+  });
+
+  it("an eval list that errexit ends keeps its write order through a duplication", async () => {
+    const env = await setupFiles(testDir, {});
+    await compareOutputs(
+      env,
+      testDir,
+      "eval 'set -e; echo O1 && echo E1 >&2 && echo O2 && false' 2>&1",
+    );
+  });
+
+  it("an exec'd 2>&1 puts fd 2 on fd 1's open for a nested shell's output", async () => {
+    const env = await setupFiles(testDir, {});
+    await compareOutputs(
+      env,
+      testDir,
+      "( exec >f 2>&1; bash -c 'echo O1; echo E1 >&2; echo O2' ); cat f",
+    );
+  });
+
+  it("an fd moved away within a list cannot be duplicated later in it", async () => {
+    const env = await setupFiles(testDir, {});
+    await compareOutputs(
+      env,
+      testDir,
+      'echo hi 3>a 1>&3- 2>&3; echo "rc=$?"; cat a',
+    );
+  });
 });

@@ -258,6 +258,54 @@ describe("fd duplication descriptor identity", () => {
   });
 });
 
+describe("persistent duplication of a standard fd", () => {
+  // `exec > f 2>&1` puts fd 2 on fd 1's open. A later result that carries
+  // both streams at once, which a nested shell hands back, is then one
+  // descriptor's worth of output and goes onto it in write order.
+  it.each([
+    ["exec > /f 2>&1"],
+    ["exec 3> /f; exec 1>&3 2>&1"],
+    ["exec > /f; exec 2>&1"],
+  ])("merges a nested shell's streams after %s", async (setup) => {
+    const env = new Bash();
+    await env.exec(`${setup}; bash -c 'echo O1; echo E1 1>&2; echo O2'`);
+    expect(await env.readFile("/f")).toBe("O1\nE1\nO2\n");
+  });
+
+  it("splits them again once fd 2 is reopened", async () => {
+    const env = new Bash();
+    await env.exec(
+      "exec > /f 2>&1; exec 2> /g; bash -c 'echo O1; echo E1 1>&2; echo O2'",
+    );
+    expect(await env.readFile("/f")).toBe("O1\nO2\n");
+    expect(await env.readFile("/g")).toBe("E1\n");
+  });
+});
+
+/**
+ * A dup within a list resolves its source through the entries the list
+ * itself opened, so an fd the list has since closed or replaced must drop out
+ * of that lookup rather than lend a later dup the open it no longer holds.
+ */
+describe("fds a redirection list has given up", () => {
+  it.each([
+    ["closed through an fd variable", "{x}>/a {x}>&- 1>&$x echo hi", "10"],
+    ["moved onto a standard fd", "echo hi 3>/a 1>&3- 2>&3", "3"],
+  ])("refuses a dup of an fd %s", async (_, script, fd) => {
+    const env = new Bash();
+    const result = await env.exec(`${script}; echo "rc=$?"`);
+    expect(result.stdout).toBe("rc=1\n");
+    expect(result.stderr).toBe(`bash: ${fd}: Bad file descriptor\n`);
+    expect(await env.readFile("/a")).toBe("");
+  });
+
+  it("does not write through an fd reopened as a here-document", async () => {
+    const env = new Bash();
+    await env.exec("echo hi 3>/a 3<<EOF 1>&3\nx\nEOF");
+    expect(await env.readFile("/a")).toBe("");
+  });
+});
+
 describe("recorded order at the public boundary", () => {
   it("hands the caller the two streams and not the pieces", async () => {
     const result = await new Bash().exec("{ echo O; echo E 1>&2; }");

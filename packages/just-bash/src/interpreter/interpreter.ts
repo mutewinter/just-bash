@@ -266,16 +266,7 @@ export class Interpreter {
         // PosixFatalError terminates the script in POSIX mode
         // POSIX 2.8.1: special builtins cause shell to exit on error
         if (error instanceof PosixFatalError) {
-          output.append(
-            "stdout",
-            error.stdout,
-            error.internalOutputAccounting.stdout,
-          );
-          output.append(
-            "stderr",
-            error.stderr,
-            error.internalOutputAccounting.stderr,
-          );
+          output.appendError(error);
           exitCode = error.exitCode;
           this.ctx.state.lastExitCode = exitCode;
           this.ctx.state.env.set("?", String(exitCode));
@@ -291,16 +282,7 @@ export class Interpreter {
           throw error;
         }
         if (error instanceof ErrexitError) {
-          output.append(
-            "stdout",
-            error.stdout,
-            error.internalOutputAccounting.stdout,
-          );
-          output.append(
-            "stderr",
-            error.stderr,
-            error.internalOutputAccounting.stderr,
-          );
+          output.appendError(error);
           exitCode = error.exitCode;
           this.ctx.state.lastExitCode = exitCode;
           this.ctx.state.env.set("?", String(exitCode));
@@ -311,16 +293,7 @@ export class Interpreter {
           };
         }
         if (error instanceof NounsetError) {
-          output.append(
-            "stdout",
-            error.stdout,
-            error.internalOutputAccounting.stdout,
-          );
-          output.append(
-            "stderr",
-            error.stderr,
-            error.internalOutputAccounting.stderr,
-          );
+          output.appendError(error);
           exitCode = 1;
           this.ctx.state.lastExitCode = exitCode;
           this.ctx.state.env.set("?", String(exitCode));
@@ -331,16 +304,7 @@ export class Interpreter {
           };
         }
         if (error instanceof BadSubstitutionError) {
-          output.append(
-            "stdout",
-            error.stdout,
-            error.internalOutputAccounting.stdout,
-          );
-          output.append(
-            "stderr",
-            error.stderr,
-            error.internalOutputAccounting.stderr,
-          );
+          output.appendError(error);
           exitCode = 1;
           this.ctx.state.lastExitCode = exitCode;
           this.ctx.state.env.set("?", String(exitCode));
@@ -353,16 +317,7 @@ export class Interpreter {
         // ArithmeticError in expansion (e.g., echo $((42x))) - the command fails
         // but the script continues execution. This matches bash behavior.
         if (error instanceof ArithmeticError) {
-          output.append(
-            "stdout",
-            error.stdout,
-            error.internalOutputAccounting.stdout,
-          );
-          output.append(
-            "stderr",
-            error.stderr,
-            error.internalOutputAccounting.stderr,
-          );
+          output.appendError(error);
           exitCode = 1;
           this.ctx.state.lastExitCode = exitCode;
           this.ctx.state.env.set("?", String(exitCode));
@@ -372,16 +327,7 @@ export class Interpreter {
         // BraceExpansionError for invalid ranges (e.g., {z..A} mixed case) - the command fails
         // but the script continues execution. This matches bash behavior.
         if (error instanceof BraceExpansionError) {
-          output.append(
-            "stdout",
-            error.stdout,
-            error.internalOutputAccounting.stdout,
-          );
-          output.append(
-            "stderr",
-            error.stderr,
-            error.internalOutputAccounting.stderr,
-          );
+          output.appendError(error);
           exitCode = 1;
           this.ctx.state.lastExitCode = exitCode;
           this.ctx.state.env.set("?", String(exitCode));

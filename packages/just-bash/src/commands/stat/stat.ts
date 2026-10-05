@@ -68,17 +68,264 @@ function formatTimestamp(
 }
 
 /**
- * Expand a `-c` FORMAT: `%` followed by optional `-`/`0` flags, an optional
- * width, and a directive. A directive with no value prints `?` rather than
+ * What a directive resolves to, typed by the printf conversion GNU stat
+ * formats it with: `%s` for text, `%u`, `%o` and `%x` for numbers, and its
+ * own `%f`-like rendering for seconds since the epoch.
+ */
+type StatValue =
+  | { kind: "string"; text: string }
+  | { kind: "uint" | "octal" | "hex"; value: number }
+  | { kind: "epoch"; ms: number };
+
+/** `%[flags][width][.precision]`, the part of a directive before its letter. */
+interface DirectiveSpec {
+  flags: string;
+  width: number | null;
+  /** Null without a `.`, the empty string for a `.` with no digits. */
+  precision: string | null;
+}
+
+/** GNU stat's printf flags, and the subset each conversion keeps. */
+const PRINTF_FLAGS = "'-+ #0I";
+const STRING_FLAGS = "-";
+const UINT_FLAGS = "'-0";
+const BASE_FLAGS = "-#0";
+const INT_FLAGS = "'-+ 0";
+
+class InvalidDirectiveError extends Error {
+  constructor(
+    message: string,
+    /** What FORMAT printed before the directive GNU rejects. */
+    readonly output: string,
+  ) {
+    super(message);
+  }
+}
+
+function keepFlags(flags: string, allowed: string): string {
+  return [...flags].filter((flag) => allowed.includes(flag)).join("");
+}
+
+/**
+ * Pad `text` to `width` with `fill`, on the right when `left` is set. Throws
+ * the output limit rather than allocating a width the output could not hold.
+ */
+function pad(
+  text: string,
+  width: number,
+  fill: string,
+  left: boolean,
+  maxOutputBytes: number,
+): string {
+  if (text.length >= width) return text;
+  if (width > maxOutputBytes) {
+    throw new ExecutionLimitError(
+      `stat: output size limit exceeded (${maxOutputBytes} bytes)`,
+      "output_size",
+    );
+  }
+  // @banned-pattern-ignore: width is bounded by maxOutputBytes directly above
+  const padding = fill.repeat(width - text.length);
+  return left ? text + padding : padding + text;
+}
+
+/** C printf's integer conversion: precision as minimum digits, then width. */
+function formatInteger(
+  digits: string,
+  sign: string,
+  prefix: string,
+  flags: string,
+  width: number | null,
+  precision: number | null,
+  maxOutputBytes: number,
+): string {
+  let body = digits;
+  if (precision !== null) {
+    body =
+      precision === 0 && digits === "0"
+        ? ""
+        : pad(digits, precision, "0", false, maxOutputBytes);
+  }
+  if (flags.includes("#") && prefix === "0" && !body.startsWith("0")) {
+    body = `0${body}`;
+  }
+  const lead = sign + (prefix === "0" ? "" : prefix);
+  if (width === null) return lead + body;
+  if (flags.includes("-")) {
+    return pad(lead + body, width, " ", true, maxOutputBytes);
+  }
+  if (flags.includes("0") && precision === null) {
+    return (
+      lead +
+      pad(body, Math.max(width - lead.length, 0), "0", false, maxOutputBytes)
+    );
+  }
+  return pad(lead + body, width, " ", false, maxOutputBytes);
+}
+
+function precisionDigits(precision: string | null): number | null {
+  return precision === null ? null : Number(precision || "0");
+}
+
+/** GNU's `out_int`: a signed decimal, with `+` and space flags honored. */
+function formatSigned(
+  value: number,
+  flags: string,
+  width: number | null,
+  maxOutputBytes: number,
+  negative = value < 0,
+): string {
+  const kept = keepFlags(flags, INT_FLAGS);
+  let sign = "";
+  if (negative) sign = "-";
+  else if (kept.includes("+")) sign = "+";
+  else if (kept.includes(" ")) sign = " ";
+  return formatInteger(
+    String(Math.abs(value)),
+    sign,
+    "",
+    kept,
+    width,
+    null,
+    maxOutputBytes,
+  );
+}
+
+/**
+ * GNU's `out_epoch_sec`: seconds since the epoch, with a precision printing
+ * that many fractional digits (nine for a bare `.`) and a width covering the
+ * whole number, fraction included.
+ */
+function formatEpoch(
+  ms: number,
+  spec: DirectiveSpec,
+  maxOutputBytes: number,
+): string {
+  let seconds = Math.floor(ms / 1000);
+  const nanoseconds = (ms - seconds * 1000) * NANOSECONDS_PER_MILLISECOND;
+  if (spec.precision === null) {
+    return formatSigned(seconds, spec.flags, spec.width, maxOutputBytes);
+  }
+  const precision = Math.min(
+    spec.precision === "" ? 9 : Number(spec.precision),
+    maxOutputBytes + 1,
+  );
+  let intFlags = spec.flags;
+  let intWidth = spec.width;
+  let width = 0;
+  if (precision > 0 && spec.width !== null) {
+    width = spec.width;
+    if (width > 1) {
+      intWidth = null;
+      const widthBeforePoint = width - 1;
+      const integerWidth = widthBeforePoint - precision;
+      if (widthBeforePoint > 1 && integerWidth > 1) {
+        // A `-` flag pads the fraction on the right instead.
+        const fractionLeft = spec.flags.includes("-");
+        intFlags = spec.flags.replaceAll("-", "");
+        intWidth = fractionLeft ? null : integerWidth;
+      }
+    }
+  }
+  const shown = Math.min(precision, 9);
+  const divisor = 10 ** (9 - shown);
+  let fraction = Math.floor(nanoseconds / divisor);
+  let minusZero = false;
+  if (seconds < 0 && nanoseconds !== 0) {
+    // Print a negative time as a negative number, not floor plus fraction.
+    fraction = 10 ** shown - fraction - (nanoseconds % divisor !== 0 ? 1 : 0);
+    if (fraction !== 0) seconds += 1;
+    minusZero = seconds === 0;
+  }
+  const integer = formatSigned(
+    seconds,
+    intFlags,
+    intWidth,
+    maxOutputBytes,
+    minusZero || seconds < 0,
+  );
+  if (precision === 0) return integer;
+  const trailingZeros = pad("", precision - shown, "0", false, maxOutputBytes);
+  const trailingWidth =
+    integer.length < width && 1 < width - integer.length
+      ? width - integer.length - 1 - shown
+      : 0;
+  // @banned-pattern-ignore: shown is at most 9
+  const digits = String(fraction).padStart(shown, "0");
+  return `${integer}.${digits}${pad(
+    trailingZeros,
+    Math.abs(trailingWidth),
+    " ",
+    true,
+    maxOutputBytes,
+  )}`;
+}
+
+/** Render `value` the way GNU stat's printf call for its kind would. */
+function formatValue(
+  value: StatValue,
+  spec: DirectiveSpec,
+  maxOutputBytes: number,
+): string {
+  switch (value.kind) {
+    case "string": {
+      const precision = precisionDigits(spec.precision);
+      const text =
+        precision === null ? value.text : value.text.slice(0, precision);
+      if (spec.width === null) return text;
+      const left = keepFlags(spec.flags, STRING_FLAGS).includes("-");
+      return pad(text, spec.width, " ", left, maxOutputBytes);
+    }
+    case "uint":
+      return formatInteger(
+        String(value.value),
+        "",
+        "",
+        keepFlags(spec.flags, UINT_FLAGS),
+        spec.width,
+        precisionDigits(spec.precision),
+        maxOutputBytes,
+      );
+    case "octal":
+    case "hex": {
+      const octal = value.kind === "octal";
+      const flags = keepFlags(spec.flags, BASE_FLAGS);
+      let prefix = "";
+      if (octal) prefix = "0";
+      else if (flags.includes("#") && value.value !== 0) prefix = "0x";
+      return formatInteger(
+        value.value.toString(octal ? 8 : 16),
+        "",
+        prefix,
+        flags,
+        spec.width,
+        precisionDigits(spec.precision),
+        maxOutputBytes,
+      );
+    }
+    case "epoch":
+      return formatEpoch(value.ms, spec, maxOutputBytes);
+  }
+}
+
+/**
+ * Expand a `-c` FORMAT: `%`, then any of GNU's printf flags (`' - + space #
+ * 0 I`), an optional width, an optional `.precision`, and a directive. Each
+ * conversion keeps only the flags GNU passes to its printf call. A directive
+ * with no value prints a bare `?`, as GNU prints an unknown one, rather than
  * reaching the caller as itself, which reads as output rather than as a gap.
  *
  * `resolve` is asked only for the directives a FORMAT actually names, so a
  * value that costs something to build is not built for a format that does not
  * use it.
+ *
+ * Throws InvalidDirectiveError, carrying the output so far, for a `%` with a
+ * flag, width or precision that is followed by `%` or by nothing, as GNU
+ * rejects it.
  */
 function expandFormat(
   format: string,
-  resolve: (directive: string) => string | undefined,
+  resolve: (directive: string) => StatValue | undefined,
   maxOutputBytes: number,
 ): string {
   let out = "";
@@ -89,11 +336,9 @@ function expandFormat(
       index++;
     } else {
       let cursor = index + 1;
-      let leftAlign = false;
-      let padding = " ";
-      while (format[cursor] === "-" || format[cursor] === "0") {
-        if (format[cursor] === "-") leftAlign = true;
-        else padding = "0";
+      let flags = "";
+      while (cursor < format.length && PRINTF_FLAGS.includes(format[cursor])) {
+        flags += format[cursor];
         cursor++;
       }
       let width = "";
@@ -101,20 +346,46 @@ function expandFormat(
         width += format[cursor];
         cursor++;
       }
-      const directive = format[cursor];
-      if (directive === undefined) {
-        // A `%` that runs off the end of FORMAT is printed as itself.
-        out += format.slice(index);
-        break;
+      let precision: string | null = null;
+      if (format[cursor] === ".") {
+        precision = "";
+        cursor++;
+        while (format[cursor] >= "0" && format[cursor] <= "9") {
+          precision += format[cursor];
+          cursor++;
+        }
       }
-      const value = directive === "%" ? "%" : (resolve(directive) ?? "?");
-      const target = Math.min(
-        width === "" ? 0 : Number.parseInt(width, 10),
-        maxOutputBytes,
-      );
-      // @banned-pattern-ignore: target is bounded by maxOutputBytes directly above
-      out += leftAlign ? value.padEnd(target) : value.padStart(target, padding);
-      index = cursor + 1;
+      const directive = format[cursor];
+      if (directive === undefined || directive === "%") {
+        if (cursor > index + 1) {
+          throw new InvalidDirectiveError(
+            `stat: '${format.slice(index, cursor + 1)}': invalid directive\n`,
+            out,
+          );
+        }
+        out += "%";
+        index = cursor + 1;
+      } else {
+        const value = resolve(directive);
+        const spec: DirectiveSpec = {
+          flags,
+          // A width beyond the output limit is clamped just past it, so the
+          // limit is reported instead of the width being parsed exactly.
+          width:
+            width === ""
+              ? null
+              : Math.min(Number.parseInt(width, 10), maxOutputBytes + 1),
+          precision:
+            precision === null || precision === ""
+              ? precision
+              : String(
+                  Math.min(Number.parseInt(precision, 10), maxOutputBytes + 1),
+                ),
+        };
+        out +=
+          value === undefined ? "?" : formatValue(value, spec, maxOutputBytes);
+        index = cursor + 1;
+      }
     }
     if (out.length > maxOutputBytes) {
       throw new ExecutionLimitError(
@@ -180,50 +451,78 @@ export const statCommand: RuntimeCommand = {
 
         if (format) {
           // Handle custom format
-          const values = new Map<string, string>([
-            ["n", file],
-            ["N", `'${file}'`],
-            ["s", String(stat.size)],
-            ["F", stat.isDirectory ? "directory" : "regular file"],
-            ["a", (stat.mode & 0o7777).toString(8)],
-            ["A", formatMode(stat.mode, stat.isDirectory)],
+          const text = (value: string): StatValue => ({
+            kind: "string",
+            text: value,
+          });
+          const mtime = stat.mtime.getTime();
+          const values = new Map<string, StatValue>([
+            ["n", text(file)],
+            ["N", text(`'${file}'`)],
+            ["s", { kind: "uint", value: stat.size }],
+            ["F", text(stat.isDirectory ? "directory" : "regular file")],
+            ["a", { kind: "octal", value: stat.mode & 0o7777 }],
+            ["A", text(formatMode(stat.mode, stat.isDirectory))],
             // The type bits are composed rather than read off `mode`, which
             // carries them on some filesystems and not others, the same
             // reason `formatMode` is passed `isDirectory` separately.
             [
               "f",
-              (
-                (stat.isDirectory ? 0o040000 : 0o100000) |
-                (stat.mode & 0o7777)
-              ).toString(16),
+              {
+                kind: "hex",
+                value:
+                  (stat.isDirectory ? 0o040000 : 0o100000) |
+                  (stat.mode & 0o7777),
+              },
             ],
-            ["u", "1000"],
-            ["U", "user"],
-            ["g", "1000"],
-            ["G", "group"],
-            ["Y", String(Math.floor(stat.mtime.getTime() / 1000))],
+            ["u", { kind: "uint", value: 1000 }],
+            ["U", text("user")],
+            ["g", { kind: "uint", value: 1000 }],
+            ["G", text("group")],
+            ["Y", { kind: "epoch", ms: mtime }],
             // Birth time is not recorded, which GNU renders as `-` and `0`.
             // Access and change times are not either, and they are left to
             // the `?` every unanswerable directive gets: reporting the
             // modification time for them would be a plausible wrong answer
             // on a filesystem where the three genuinely differ.
-            ["w", "-"],
-            ["W", "0"],
+            ["w", text("-")],
+            ["W", { kind: "epoch", ms: 0 }],
           ]);
           // Formatted on demand, so a FORMAT that names no wall clock does
           // not pay for one, and cannot fail a limit its own output fits.
-          let wallClock: string | undefined;
+          let wallClock: StatValue | undefined;
           const resolve = (directive: string) => {
             if (directive !== "y") return values.get(directive);
             if (wallClock === undefined) {
-              wallClock = formatTimestamp(stat.mtime, timezone, {
-                maxOperations: ctx.limits.maxLoopIterations,
-                maxOutputBytes,
-              });
+              wallClock = text(
+                formatTimestamp(stat.mtime, timezone, {
+                  maxOperations: ctx.limits.maxLoopIterations,
+                  maxOutputBytes,
+                }),
+              );
             }
             return wallClock;
           };
-          appendStdout(`${expandFormat(format, resolve, maxOutputBytes)}\n`);
+          // Scanning FORMAT is linear in its length, so each expansion is
+          // charged that length against the loop limit and the work budget.
+          if (format.length > ctx.limits.maxLoopIterations) {
+            throw new ExecutionLimitError(
+              `stat: format work limit exceeded (${ctx.limits.maxLoopIterations})`,
+              "iterations",
+            );
+          }
+          ctx.executionScope?.consumeWork(format.length, "stat format");
+          let expanded: string;
+          try {
+            expanded = expandFormat(format, resolve, maxOutputBytes);
+          } catch (error) {
+            if (!(error instanceof InvalidDirectiveError)) throw error;
+            // GNU stops at the first invalid directive, after printing the
+            // part of FORMAT before it.
+            appendStdout(error.output);
+            return { stdout, stderr: stderr + error.message, exitCode: 1 };
+          }
+          appendStdout(`${expanded}\n`);
         } else {
           // Default format
           const modeOctal = stat.mode.toString(8).padStart(4, "0");

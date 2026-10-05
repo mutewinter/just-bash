@@ -129,3 +129,79 @@ describe("stat -c directives", () => {
     expect(result.exitCode).toBe(126);
   });
 });
+
+// Expected values below were recorded from GNU coreutils 9.12 `stat` on a
+// file with the same size, mode and mtime, with the path written as /test.txt.
+describe("stat -c flags and precision", () => {
+  it.each([
+    ["%#a", "0644"],
+    ["%#f", "0x81a4"],
+    ["[%#5a]", "[ 0644]"],
+    ["[%-#8a]", "[0644    ]"],
+    ["[%+5s]", "[   11]"],
+    ["[% 5s]", "[   11]"],
+    ["[%'s]", "[11]"],
+    ["[%.4s]", "[0011]"],
+    ["[%10.4n]", "[      /tes]"],
+    ["[%.2n]", "[/t]"],
+    ["[%012n]", "[   /test.txt]"],
+    ["[%.2y]", "[20]"],
+    ["[%-25.10y]", "[2024-01-15               ]"],
+    ["[%5q]", "[?]"],
+  ])("formats %s", async (format, expected) => {
+    const result = await envWithFile().exec(`stat -c "${format}" /test.txt`);
+    expect(result.stdout).toBe(`${expected}\n`);
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+  });
+
+  it.each([
+    ["[%.3Y]", "[1705310234.764]"],
+    ["[%.Y]", "[1705310234.764000000]"],
+    ["[%.12Y]", "[1705310234.764000000000]"],
+    ["[%.0Y]", "[1705310234]"],
+    ["[%+.1Y]", "[+1705310234.7]"],
+    ["[%+5Y]", "[+1705310234]"],
+    ["[%15.3Y]", "[ 1705310234.764]"],
+    ["[%-15.3Y]", "[1705310234.764 ]"],
+    ["[%015.3Y]", "[01705310234.764]"],
+    ["[%4.3Y]", "[1705310234.764]"],
+    ["[%.3W]", "[0.000]"],
+  ])("formats seconds since the epoch as %s", async (format, expected) => {
+    const result = await envWithFile().exec(`stat -c "${format}" /test.txt`);
+    expect(result.stdout).toBe(`${expected}\n`);
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+  });
+
+  it.each([
+    ["a%5%b", "a", "%5%"],
+    ["x%-", "x", "%-"],
+    ["x%5", "x", "%5"],
+    ["x%.%", "x", "%.%"],
+  ])("rejects %s as an invalid directive", async (format, stdout, directive) => {
+    const result = await envWithFile().exec(`stat -c "${format}" /test.txt`);
+    expect(result.stdout).toBe(stdout);
+    expect(result.stderr).toBe(`stat: '${directive}': invalid directive\n`);
+    expect(result.exitCode).toBe(1);
+  });
+
+  it("prints %% after a bare percent and a trailing percent as itself", async () => {
+    const result = await envWithFile().exec("stat -c '%%%' /test.txt");
+    expect(result.stdout).toBe("%%\n");
+    expect(result.exitCode).toBe(0);
+  });
+});
+
+describe("stat -c work limits", () => {
+  it("charges the FORMAT scan against the loop limit", async () => {
+    const env = new Bash({
+      files: { "/test.txt": "hello" },
+      executionLimits: { maxLoopIterations: 100 },
+    });
+    const result = await env.exec(`stat -c "%${"-".repeat(200)}s" /test.txt`);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("stat: format work limit exceeded (100)");
+    expect(result.exitCode).toBe(126);
+  });
+});

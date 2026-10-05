@@ -151,7 +151,7 @@ console.log(result.stdout);
 Available as a global or via `require('process')`.
 
 ```js
-process.argv        // ["js-exec", scriptPath, ...args]; ["js-exec", ...args] for inline code
+process.argv        // ["js-exec", scriptPath, ...args]; ["js-exec", ...args] for inline code or stdin
 process.cwd()       // current working directory
 process.exit(0)     // exit with code
 process.env         // environment variables (e.g. process.env.HOME)

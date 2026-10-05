@@ -42,6 +42,8 @@ import { PATH_MODULE_SOURCE } from "./path-polyfill.js";
 interface RunJsOptions {
   source: string;
   scriptPath: string;
+  /** `process.argv[1]`, or undefined for no entry there. */
+  argvScript: string | undefined;
   scriptArgs: string[];
   bootstrapCode?: string;
   isModule: boolean;
@@ -817,13 +819,12 @@ async function executeWithRunInner(
     return Uint8Array.from(data);
   };
   const env = mapToRecord(ctx.env);
-  // Node's shape: the executable, then the script for a file (nothing for
-  // inline code, as with `node -e`), then the arguments, so a file reads its
-  // arguments with `process.argv.slice(2)` and inline code with `slice(1)`,
-  // as under node.
+  // Node's shape: the executable, then the script when there is one (a
+  // file, or `-` for stdin named as the script; nothing for inline code or
+  // stdin by default), then the arguments.
   const argv = [
     "js-exec",
-    ...(options.scriptPath === "-c" ? [] : [options.scriptPath]),
+    ...(options.argvScript === undefined ? [] : [options.argvScript]),
     ...options.scriptArgs,
   ];
   const maxGuestInputBytes = Math.min(

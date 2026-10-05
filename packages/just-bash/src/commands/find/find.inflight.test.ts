@@ -16,20 +16,24 @@ class SlowReaddirFs extends InMemoryFs {
   constructor(
     files: Record<string, string>,
     private readonly delayMs: number,
+    private readonly stalled: ReadonlySet<string> = new Set(),
   ) {
     super(files);
   }
 
-  private readonly pause = () =>
-    new Promise<void>((resolve) => hostSetTimeout(resolve, this.delayMs));
+  /** A read of a stalled path never settles, like a hung network mount. */
+  private readonly pause = (path: string) =>
+    new Promise<void>((resolve) => {
+      if (!this.stalled.has(path)) hostSetTimeout(resolve, this.delayMs);
+    });
 
   override async readdir(path: string): Promise<string[]> {
-    await this.pause();
+    await this.pause(path);
     return super.readdir(path);
   }
 
   override async readdirWithFileTypes(path: string): Promise<DirentEntry[]> {
-    await this.pause();
+    await this.pause(path);
     return super.readdirWithFileTypes(path);
   }
 }
@@ -88,4 +92,42 @@ describe("find failing part way through a batch", () => {
     expect(result.exitCode).toBe(exitCode);
     expect(unhandled).toEqual([]);
   });
+
+  // Each read takes 250ms, longer than the 100ms cleanup grace the dispatcher
+  // gives a cancelled command, so the children still in flight at 350ms
+  // settle after `exec` has returned and the execution has been deactivated.
+  it.each([
+    ["an abort", {}, 350],
+    ["the execution deadline", { maxExecutionTimeMs: 350 }, undefined],
+  ] as const)("leaves nothing to reject when reads outlast the cleanup grace after %s", async (_reason, executionLimits, abortAfterMs) => {
+    const bash = new Bash({
+      fs: new SlowReaddirFs(tree(), 250),
+      executionLimits,
+    });
+    const controller = new AbortController();
+    if (abortAfterMs !== undefined) {
+      hostSetTimeout(() => controller.abort(), abortAfterMs);
+    }
+
+    const result = await bash.exec("find /t -type f", {
+      signal: controller.signal,
+    });
+    // Long enough for every read still in flight to settle.
+    await new Promise((resolve) => hostSetTimeout(resolve, 500));
+
+    expect(result.exitCode).toBe(124);
+    expect(unhandled).toEqual([]);
+  });
+
+  it("fails on a traversal limit without waiting for a read that never settles", async () => {
+    const bash = new Bash({
+      fs: new SlowReaddirFs(tree(), 20, new Set(["/t/d29"])),
+      executionLimits: { maxTraversalEntries: 500, maxTraversalWork: 500 },
+    });
+
+    const result = await bash.exec("find /t -type f");
+
+    expect(result.exitCode).toBe(126);
+    expect(unhandled).toEqual([]);
+  }, 3000);
 });

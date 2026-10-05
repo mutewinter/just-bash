@@ -4,7 +4,10 @@ import type { ExecutionScope } from "../../execution-scope.js";
 import type { DirentEntry } from "../../fs/interface.js";
 import { FileTraversalBudget } from "../../fs/traversal.js";
 import { shellJoinArgs } from "../../helpers/shell-quote.js";
-import { ExecutionLimitError } from "../../interpreter/errors.js";
+import {
+  ExecutionAbortedError,
+  ExecutionLimitError,
+} from "../../interpreter/errors.js";
 import type {
   ExecResult,
   RuntimeCommand,
@@ -17,25 +20,62 @@ import { formatMode } from "../format-mode.js";
 const FIND_BATCH_SIZE = 500;
 
 /**
- * Wait for every node in a batch before failing on any of them.
+ * Wait for a batch of nodes, failing on the first failure or as soon as the
+ * command's signal aborts, without waiting for the rest.
  *
- * `Promise.all` rejects on the first failure and leaves the rest of the batch
- * running. Those siblings finish after `find` has returned, once the command's
- * execution has been deactivated, and the defense-in-depth box blocks the
- * rejection handler `Promise.all` attached to each of them and re-raises the
- * error on a promise nothing holds: one unhandled rejection per sibling, which
- * ends a Node process that has no handler. Waiting keeps every continuation
- * inside the execution that started it. The failure reported is the first in
- * traversal order.
+ * Every node gets its rejection handler here, at once, through `await` rather
+ * than `Promise.prototype.then`. The defense-in-depth box blocks a `then`
+ * callback that runs after the command's execution has been deactivated and
+ * re-raises its error on a promise nothing holds, so `Promise.all` and
+ * `Promise.allSettled` both leave an unhandled rejection behind for each node
+ * that fails after `find` has returned, which ends a Node process that has no
+ * handler. `await` does not go through the patched `then`, so a node that
+ * fails late, even past the dispatcher's cleanup grace, is still handled.
+ * Not waiting for the rest keeps one stalled read from holding `find` open.
  */
-async function settleBatch<T>(work: readonly Promise<T>[]): Promise<T[]> {
-  const settled = await Promise.allSettled(work);
-  const values: T[] = [];
-  for (const result of settled) {
-    if (result.status === "rejected") throw result.reason;
-    values.push(result.value);
-  }
-  return values;
+function settleBatch<T>(
+  work: readonly Promise<T>[],
+  signal: AbortSignal | undefined,
+): Promise<T[]> {
+  return new Promise<T[]>((resolve, reject) => {
+    const values: T[] = [];
+    let remaining = work.length;
+    let done = false;
+    const onAbort = () => fail(signal?.reason ?? new ExecutionAbortedError());
+    const finish = () => {
+      done = true;
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const fail = (error: unknown) => {
+      if (done) return;
+      finish();
+      reject(error);
+    };
+    const watch = async (node: Promise<T>, index: number) => {
+      try {
+        values[index] = await node;
+      } catch (error) {
+        fail(error);
+        return;
+      }
+      remaining--;
+      if (remaining === 0 && !done) {
+        finish();
+        resolve(values);
+      }
+    };
+    for (let index = 0; index < work.length; index++) {
+      void watch(work[index], index);
+    }
+    if (remaining === 0) {
+      finish();
+      resolve(values);
+    } else if (signal?.aborted) {
+      onAbort();
+    } else {
+      signal?.addEventListener("abort", onAbort, { once: true });
+    }
+  });
 }
 
 // Tracing helpers
@@ -739,6 +779,7 @@ export const findCommand: RuntimeCommand = {
             workCursor = batchEnd;
             const nodes = await settleBatch(
               batch.map((q) => processNode(q.item)),
+              ctx.signal,
             );
             traceCounters.batchCount++;
             traceCounters.batchTime += Date.now() - batchStart;
@@ -845,6 +886,7 @@ export const findCommand: RuntimeCommand = {
                 const node = await processNode(item);
                 return node ? { node, orderIndex } : null;
               }),
+              ctx.signal,
             );
             traceCounters.batchCount++;
             traceCounters.batchTime += Date.now() - batchStart;

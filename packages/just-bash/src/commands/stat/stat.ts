@@ -9,6 +9,7 @@ import type {
 import { parseArgs } from "../../utils/args.js";
 import { formatMode } from "../format-mode.js";
 import { hasHelpFlag, showHelp } from "../help.js";
+import { resolveTimezoneAt } from "../posix-timezone.js";
 import { formatStrftime } from "../printf/strftime.js";
 
 const statHelp = {
@@ -35,35 +36,26 @@ const argDefs = {
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 
 /**
- * The timezone timestamps are shown in, on the same contract as `date`: $TZ
- * when Intl accepts it, UTC otherwise, so the host zone never leaks unless the
- * caller opts in.
- */
-function displayTimezone(tz: string | undefined): string {
-  if (!tz) return "UTC";
-  try {
-    new Intl.DateTimeFormat(undefined, { timeZone: tz });
-    return tz;
-  } catch {
-    return "UTC";
-  }
-}
-
-/**
  * A timestamp in GNU's `%y` form: `2024-01-15 09:17:14.764000000 +0000`.
  * The filesystem stores milliseconds, so the last six digits are always zero.
+ *
+ * `$TZ` is read as a zone Intl accepts, or as a POSIX TZ string resolved to
+ * the offset it puts in effect at `when`, and as UTC otherwise, as glibc does
+ * for a value it cannot parse. No `$TZ` is UTC, as in `date`, so the host
+ * zone never leaks unless the caller opts in.
  */
 function formatTimestamp(
   when: Date,
-  tz: string,
+  tz: string | undefined,
   limits: { maxOperations: number; maxOutputBytes: number },
 ): string {
+  const zone = (tz && resolveTimezoneAt(tz, when.getTime())) || "UTC";
   const seconds = Math.floor(when.getTime() / 1000);
   const nanoseconds = String(
     when.getMilliseconds() * NANOSECONDS_PER_MILLISECOND,
   ).padStart(9, "0");
-  const wall = formatStrftime("%Y-%m-%d %H:%M:%S", seconds, tz, limits);
-  const offset = formatStrftime("%z", seconds, tz, limits);
+  const wall = formatStrftime("%Y-%m-%d %H:%M:%S", seconds, zone, limits);
+  const offset = formatStrftime("%z", seconds, zone, limits);
   return `${wall}.${nanoseconds} ${offset}`;
 }
 
@@ -430,7 +422,7 @@ export const statCommand: RuntimeCommand = {
       ctx.limits.maxOutputSize,
       ctx.limits.maxStringLength,
     );
-    const timezone = displayTimezone(ctx.env.get("TZ"));
+    const timezone = ctx.env.get("TZ");
     const appendStdout = (value: string): void => {
       const valueBytes = utf8ByteLength(value);
       if (valueBytes > maxOutputBytes - stdoutBytes) {

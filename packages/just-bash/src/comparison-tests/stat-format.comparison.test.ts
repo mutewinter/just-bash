@@ -7,9 +7,11 @@ import {
 } from "./fixture-runner.js";
 
 /**
- * `stat -c` is GNU-only, so these fixtures were recorded from GNU coreutils
- * 9.2 and locked. Timestamp directives are left out: they cannot be compared
- * against a recording. They are covered in `commands/stat/stat.format.test.ts`.
+ * `stat -c` is GNU-only, and a macOS recording runs BSD `stat`, so these
+ * fixtures were recorded from GNU coreutils 9.12 (Homebrew's `gstat`, put on
+ * PATH as `stat`, under `LC_ALL=C`) and locked. Timestamp directives are left
+ * out: they cannot be compared against a recording. They are covered in
+ * `commands/stat/stat.format.test.ts`.
  */
 describe("stat -c - Real Bash Comparison", () => {
   let testDir: string;

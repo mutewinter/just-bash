@@ -24,7 +24,9 @@ Examples:
   echo 'console.log("hello")' | js-exec
 
 File Extension Auto-Detection:
-  .js              function-body mode
+  .js              function-body mode, or ES module mode when the code uses
+                   import/export syntax (as Node detects it)
+  .cjs             function-body mode
   .mjs             ES module mode
   .ts, .mts        ES module mode + TypeScript stripping
 
@@ -43,6 +45,15 @@ Limits:
   Timeout: configurable via maxJsTimeoutMs
   Engine: run (QuickJS)
 `;
+
+/**
+ * A line opening with a static `import` or `export`, or `import.meta`
+ * anywhere: syntax only a module accepts, which Node uses to run a `.js` file
+ * or `-e` code as ESM. A dynamic import call is valid in a script and does
+ * not count.
+ */
+const MODULE_SYNTAX =
+  /^[ \t]*(?:import[ \t]+[\w$*{"']|import[ \t]*[{*"']|export[ \t]+[\w$*{]|export[ \t]*[{*])|\bimport\.meta\b/m;
 
 interface ParsedArgs {
   code: string | null;
@@ -164,7 +175,8 @@ export const jsExecCommand: RuntimeCommand = {
       parsed.isModule ||
       scriptPath.endsWith(".mjs") ||
       scriptPath.endsWith(".mts") ||
-      scriptPath.endsWith(".ts");
+      scriptPath.endsWith(".ts") ||
+      (!scriptPath.endsWith(".cjs") && MODULE_SYNTAX.test(source));
     return await executeWithRun(
       {
         bootstrapCode: ctx.jsBootstrapCode,

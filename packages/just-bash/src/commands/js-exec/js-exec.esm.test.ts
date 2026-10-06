@@ -233,4 +233,74 @@ describe("js-exec ESM modules", () => {
     expect(result.stdout).toBe("deep-chain\n");
     expect(result.exitCode).toBe(0);
   });
+
+  describe("module syntax outside .mjs", () => {
+    it.each([
+      [
+        "a .js file with a static import",
+        "/home/user/imp.js",
+        "import fs from 'node:fs';\nconsole.log(fs.existsSync('/home/user'));\n",
+        "true\n",
+      ],
+      [
+        "a .js file with an export",
+        "/home/user/exp.js",
+        "export const n = 2;\nconsole.log(n);\n",
+        "2\n",
+      ],
+      [
+        "a .js file reading import.meta",
+        "/home/user/meta.js",
+        "console.log(typeof import.meta);\n",
+        "object\n",
+      ],
+    ])("runs %s as a module", async (_name, file, source, stdout) => {
+      const env = new Bash({ javascript: true, files: { [file]: source } });
+      const result = await env.exec(`js-exec ${file}`);
+      expect(result).toMatchObject({ exitCode: 0, stderr: "", stdout });
+    });
+
+    it("runs -c code with a static import as a module", async () => {
+      const env = new Bash({ javascript: true });
+      const result = await env.exec(
+        `js-exec -c "import { join } from 'path'; console.log(join('a', 'b'))"`,
+      );
+      expect(result).toMatchObject({
+        exitCode: 0,
+        stderr: "",
+        stdout: "a/b\n",
+      });
+    });
+
+    it("runs stdin with a static import as a module", async () => {
+      const env = new Bash({ javascript: true });
+      const result = await env.exec(
+        `printf 'import { join } from "path";\\nconsole.log(join("a", "b"))\\n' | js-exec`,
+      );
+      expect(result).toMatchObject({
+        exitCode: 0,
+        stderr: "",
+        stdout: "a/b\n",
+      });
+    });
+
+    it.each([
+      [
+        "a dynamic import",
+        "/home/user/dyn.js",
+        "const important = 1;\nconsole.log(typeof import('fs').then, important);\nreturn;\n",
+        "function 1\n",
+      ],
+      [
+        "import syntax in a .cjs file",
+        "/home/user/c.cjs",
+        "const text = `\nimport x from 'y'\n`;\nconsole.log(text.length);\nreturn;\n",
+        "19\n",
+      ],
+    ])("keeps function-body mode for %s", async (_name, file, source, stdout) => {
+      const env = new Bash({ javascript: true, files: { [file]: source } });
+      const result = await env.exec(`js-exec ${file}`);
+      expect(result).toMatchObject({ exitCode: 0, stderr: "", stdout });
+    });
+  });
 });

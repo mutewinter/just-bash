@@ -39,7 +39,6 @@ export class BridgeHandler {
   private protocol: ProtocolBuffer;
   private running = false;
   private stopped = false;
-  private releaseOperation: (() => void) | null = null;
   private output: BridgeOutput = { stdout: "", stderr: "", exitCode: 0 };
   private outputLimitExceeded = false;
   private startTime = 0;
@@ -105,28 +104,6 @@ export class BridgeHandler {
   }
 
   /**
-   * Settles with the operation, or as soon as stop() is called: a worker that
-   * died mid-operation will never read the result, and an operation that
-   * never settles would otherwise hold run() until its deadline, or forever.
-   */
-  private untilStopped(operation: Promise<void>): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      this.releaseOperation = resolve;
-      // Native await rather than .then or Promise.race, as in raceDeadline.
-      void (async () => {
-        try {
-          await operation;
-          resolve();
-        } catch (error) {
-          reject(error);
-        } finally {
-          if (this.releaseOperation === resolve) this.releaseOperation = null;
-        }
-      })();
-    });
-  }
-
-  /**
    * Run the handler loop until EXIT operation or timeout.
    */
   async run(timeoutMs: number): Promise<BridgeOutput> {
@@ -156,7 +133,7 @@ export class BridgeHandler {
       if (!this.running) break;
 
       const opCode = this.protocol.getOpCode();
-      await this.untilStopped(this.handleOperation(opCode));
+      await this.handleOperation(opCode);
 
       // handleOperation sets status to SUCCESS/ERROR
       // Notify worker so it wakes up and sees the result
@@ -166,10 +143,13 @@ export class BridgeHandler {
     return this.output;
   }
 
+  /**
+   * Ends the loop. An operation already in flight runs to completion first,
+   * so run() returns only after its host side effects have landed.
+   */
   stop(): void {
     this.stopped = true;
     this.running = false;
-    this.releaseOperation?.();
     // Wake a handler blocked before the worker's first bridge operation.
     this.protocol.setStatus(Status.READY);
     this.protocol.notify();

@@ -35,11 +35,11 @@ vi.mock("node:worker_threads", async () => {
         throw new Error("Cannot find module worker.js");
       }
       if (mockState.death === "mid-operation") {
-        // Ask the bridge to read a file whose read never settles, then die
-        // while the bridge is still awaiting it.
+        // Ask the bridge to read a file whose read is still pending, then die
+        // while the bridge is awaiting it.
         const protocol = new ProtocolBuffer(options.workerData.sharedBuffer);
         protocol.setOpCode(OpCode.READ_FILE);
-        protocol.setPath("/hangs");
+        protocol.setPath("/pending");
         protocol.setStatus(Status.READY);
         protocol.notify();
         setTimeout(() => {
@@ -96,6 +96,7 @@ beforeAll(async () => {
   python3 = await import("./python3.js");
 });
 afterAll(() => {
+  vi.doUnmock("node:worker_threads");
   vi.resetModules();
 });
 
@@ -129,19 +130,27 @@ describe("python3 worker that dies before its bridge EXIT", () => {
   );
 
   it(
-    "fails at once when the worker dies during a bridge operation",
+    "finishes the bridge operation in flight, then fails without the timeout",
     { timeout: 5_000 },
     async () => {
       mockState.death = "mid-operation";
       const fs = new InMemoryFs();
-      const readFileBuffer = vi
-        .spyOn(fs, "readFileBuffer")
-        .mockReturnValue(new Promise(() => {}));
+      let readSettled = false;
+      const readFileBuffer = vi.spyOn(fs, "readFileBuffer").mockReturnValue(
+        new Promise((resolve) => {
+          // Settles after the worker has died.
+          setTimeout(() => {
+            readSettled = true;
+            resolve(new Uint8Array());
+          }, 200);
+        }),
+      );
       const result = await python3.python3Command.execute(
         ["-c", "print(1)"],
         context(fs),
       );
-      expect(readFileBuffer).toHaveBeenCalledWith("/hangs");
+      expect(readFileBuffer).toHaveBeenCalledWith("/pending");
+      expect(readSettled).toBe(true);
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("worker crashed");
       expect(result.stderr).not.toContain("timeout");

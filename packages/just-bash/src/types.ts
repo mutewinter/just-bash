@@ -77,6 +77,13 @@ export interface CommandExecOptions {
    */
   replaceEnv?: boolean;
   /**
+   * Initialize a nested shell's environment, as `sh`/`bash` do. Implies `replaceEnv`: `env`
+   * is the child's environment, so its keys are exported, and the shell
+   * initializes startup variables (IFS, OPTIND, SHELLOPTS, ...) without
+   * adding export attributes. Inherited export attributes are preserved.
+   */
+  newShell?: boolean;
+  /**
    * Working directory for the exec.
    * Required to prevent bugs where subcommands run in the wrong directory.
    * Always pass `ctx.cwd` from the calling command's context.

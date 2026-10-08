@@ -164,24 +164,53 @@ function withoutTrailingSemicolons(code: string): string {
  * `console.log` as it is before the program runs and returns the printer,
  * so the program can neither see the printer nor change what it calls.
  */
-const PRINTER = `((log) => (thunk) => { const values = thunk(); const v = values.length === 0 ? undefined : values[values.length - 1]; log(typeof v === 'string' ? v : typeof v === 'symbol' ? v.toString() : typeof v === 'bigint' ? v + 'n' : typeof v === 'function' ? (v.name ? '[Function: ' + v.name + ']' : '[Function (anonymous)]') : v instanceof RegExp ? String(v) : v instanceof Date ? v.toISOString() : v instanceof Error ? String(v) + (v.stack ? '\\n' + v.stack : '') : v === undefined || v === null || typeof v === 'number' || typeof v === 'boolean' ? String(v) : (function () { try { return JSON.stringify(v); } catch (_) { return String(v); } })()); })(console.log)`;
+const PRINTER = `((log) => (thunk) => { const v = thunk(); log(typeof v === 'string' ? v : typeof v === 'symbol' ? v.toString() : typeof v === 'bigint' ? v + 'n' : typeof v === 'function' ? (v.name ? '[Function: ' + v.name + ']' : '[Function (anonymous)]') : v instanceof RegExp ? String(v) : v instanceof Date ? (v.getTime() === v.getTime() ? v.toISOString() : 'Invalid Date') : v instanceof Error ? String(v) + (v.stack ? '\\n' + v.stack : '') : v === undefined || v === null || typeof v === 'number' || typeof v === 'boolean' ? String(v) : (function () { try { return JSON.stringify(v); } catch (_) { return String(v); } })()); })(console.log)`;
+
+/**
+ * Whether the program is nothing but whitespace, semicolons and comments,
+ * which node prints as `undefined`. It reads from the start and stops at
+ * the first other character, so it never has to tell a comment from a
+ * string or a regex, and it stays linear in the program's length.
+ */
+function isEmptyProgram(code: string): boolean {
+  let index = 0;
+  while (index < code.length) {
+    if (code[index] === ";" || /\s/u.test(code[index])) {
+      index++;
+    } else if (code.startsWith("//", index)) {
+      const end = code.indexOf("\n", index);
+      if (end === -1) return true;
+      index = end + 1;
+    } else if (code.startsWith("/*", index)) {
+      const end = code.indexOf("*/", index + 2);
+      if (end === -1) return false;
+      index = end + 2;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
 
 /**
  * `-p` prints the value of one expression, which is what node prints for a
- * single expression statement; an empty program, or one that is only a
- * comment, prints `undefined`, as node does. A program of several
+ * single expression statement; an empty program, or one that is only
+ * comments, prints `undefined`, as node does. A program of several
  * statements is a syntax error here.
  *
- * The expression is the one element of an array literal returned by an
- * arrow function (so nothing at all is an empty array, and the printer
- * prints `undefined` for it), and `forEach` takes the printer, which is
- * built (and reads `console.log`) before `forEach` calls the arrow. So the
- * expression stays on line 1 a few columns in, and no name the wrapper adds
- * is in its scope. The newline before the closing bracket keeps a trailing
- * line comment from swallowing it.
+ * The expression is parenthesized and returned by an arrow function, so it
+ * must be exactly one expression (`1,` and `...a` are syntax errors, as
+ * under node), and `forEach` takes the printer, which is built (and reads
+ * `console.log`) before `forEach` calls the arrow. So the expression stays
+ * on line 1 a few columns in, and no name the wrapper adds is in its scope.
+ * The newline before the closing parenthesis keeps a trailing line comment
+ * from swallowing it.
  */
 function printSource(code: string): string {
-  return `[() => [${withoutTrailingSemicolons(code)}\n]].forEach(${PRINTER});\n`;
+  const expression = isEmptyProgram(code)
+    ? "void 0"
+    : withoutTrailingSemicolons(code);
+  return `[() => (${expression}\n)].forEach(${PRINTER});\n`;
 }
 
 export const jsExecCommand: RuntimeCommand = {

@@ -160,6 +160,7 @@ describe("js-exec", () => {
         "'\n",
       ],
       ["a comment alone", `js-exec -p "// nothing"`, "undefined\n"],
+      ["comments alone", `js-exec -p "/* a */ ; // b"`, "undefined\n"],
       [
         "a value after console.log is replaced",
         `js-exec -p "(console.log = () => {}, 42)"`,
@@ -170,6 +171,7 @@ describe("js-exec", () => {
       ["a named function", `js-exec -p "(function f() {})"`, "[Function: f]\n"],
       ["an arrow function", `js-exec -p "() => 1"`, "[Function (anonymous)]\n"],
       ["a date", `js-exec -p "new Date(0)"`, "1970-01-01T00:00:00.000Z\n"],
+      ["an invalid date", `js-exec -p "new Date(NaN)"`, "Invalid Date\n"],
       [
         "null and NaN",
         `js-exec -p "[null, NaN].map(String)"`,
@@ -196,6 +198,16 @@ describe("js-exec", () => {
       const result = await env.exec(`js-exec -p "typeof __jbPrint"`);
       expect(result.stdout).toBe("undefined\n");
       expect(result.exitCode).toBe(0);
+    });
+
+    it.each([
+      ["a trailing comma", `js-exec -p "1,"`],
+      ["a spread", `js-exec -p "...[1, 2]"`],
+    ])("should refuse %s in -p code, as node does", async (_name, command) => {
+      const env = new Bash({ javascript: true });
+      const result = await env.exec(command);
+      expect(result.stdout).toBe("");
+      expect(result.exitCode).toBe(1);
     });
 
     it("should refuse a -p program of several statements", async () => {

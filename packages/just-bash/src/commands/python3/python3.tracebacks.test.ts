@@ -152,6 +152,37 @@ EOF`);
     }
   });
 
+  it("gives the program its own traceback.py when it imports one", async () => {
+    const env = new Bash({ python: true });
+    await env.exec(
+      "mkdir -p /tmp/own && echo 'MINE = 1' > /tmp/own/traceback.py && echo 'import traceback; print(traceback.MINE)' > /tmp/own/main.py",
+    );
+    const result = await env.exec("python3 /tmp/own/main.py");
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("1\n");
+    const loaded = await env.exec(
+      `python3 -c "import sys; print('traceback' in sys.modules)"`,
+    );
+    expect(loaded.stdout).toBe("False\n");
+  });
+
+  it("puts the absolute launch directory on sys.path for -m", async () => {
+    const env = new Bash({ python: true });
+    await env.exec(
+      "mkdir -p /tmp/mod/sub && echo 'V = 1' > /tmp/mod/helper.py",
+    );
+    await env.exec(`cat > /tmp/mod/app.py << 'EOF'
+import os, sys
+print(sys.path[0])
+os.chdir("sub")
+import helper
+print(helper.V)
+EOF`);
+    const result = await env.exec("cd /tmp/mod && python3 -m app");
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("/tmp/mod\n1\n");
+  });
+
   it("prints a syntax error the way CPython does, naming no wrapper", async () => {
     const env = new Bash({ python: true });
     const result = await env.exec(`python3 -c "x = = 1"`);

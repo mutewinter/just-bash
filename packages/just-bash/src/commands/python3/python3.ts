@@ -676,6 +676,7 @@ export const python3Command: RuntimeCommand = {
       }
       pythonCode = `import runpy; runpy.run_module('${parsed.module}', run_name='__main__')`;
       scriptPath = parsed.module;
+      source = "module";
     } else if (parsed.scriptFile === "-") {
       // CPython's `python3 -` reads the program from standard input.
       // Empty stdin runs an empty program (exit 0) — matching CPython's

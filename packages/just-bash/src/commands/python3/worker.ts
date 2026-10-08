@@ -37,9 +37,11 @@ export interface WorkerInput {
    * Where the program came from, which decides the name it is compiled under
    * and so what a traceback shows: a script file is named by `scriptPath` as
    * typed, a program read from stdin `<stdin>`, and inline code (`-c`, or an
-   * `-m` bootstrap) `<string>`, the name CPython gives `-c` code.
+   * `-m` bootstrap) `<string>`, the name CPython gives `-c` code. An `-m`
+   * bootstrap is `module`, since it also puts the launch directory on
+   * sys.path.
    */
-  source?: "file" | "inline" | "stdin";
+  source?: "file" | "inline" | "module" | "stdin";
   timeoutMs?: number;
   /** Maximum size of one HOSTFS file, enforced before guest allocations. */
   maxFileSize?: number;
@@ -1443,6 +1445,15 @@ async function runPython(input: WorkerInput): Promise<WorkerOutput> {
       : undefined;
   const fileName =
     mainFile ?? (input.source === "stdin" ? "<stdin>" : "<string>");
+  // sys.path[0] as CPython sets it: a script's directory, the directory `-m`
+  // was run from (absolute, so a later chdir does not move it), or '' for
+  // `-c` and stdin, which follows the current directory.
+  const programDir =
+    mainFile !== undefined
+      ? JSON.stringify(posix.dirname(mainFile))
+      : input.source === "module"
+        ? JSON.stringify(posix.resolve(input.cwd))
+        : "''";
   const programPath = "/tmp/_jb_program.py";
   const programCode = `
 import types as _jb_types
@@ -1499,7 +1510,7 @@ _jb_main = _jb_types.ModuleType('__main__')
 ${fileName === "<string>" ? "" : `_jb_main.__file__ = ${JSON.stringify(fileName)}`}
 # sys.path[0] is this wrapper's MEMFS directory; the program's takes its place.
 sys.path_importer_cache.pop(sys.path[0], None)
-sys.path[0] = ${mainFile === undefined ? "''" : JSON.stringify(posix.dirname(mainFile))}
+sys.path[0] = ${programDir}
 sys.modules['__main__'] = _jb_main
 with _orig_open(${JSON.stringify(programPath)}, encoding='utf-8', newline='') as _jb_file:
     _jb_code = compile(_jb_file.read(), ${JSON.stringify(fileName)}, 'exec')
@@ -1509,9 +1520,16 @@ exec(_jb_code, _jb_main.__dict__)
   // The traceback module is imported, and sys.path saved, before the
   // program's directory goes on sys.path, so a traceback.py (or any module the
   // formatter imports lazily) beside the program cannot replace the formatter.
+  // The formatter keeps the modules that import loaded, but they leave
+  // sys.modules, so the program's own imports search sys.path as under
+  // CPython and find a traceback.py beside it first.
   const wrappedCode = `
 import sys
+_jb_loaded = set(sys.modules)
 import traceback as _jb_traceback
+for _jb_name in set(sys.modules) - _jb_loaded:
+    del sys.modules[_jb_name]
+del _jb_loaded
 _jb_sys_path = list(sys.path)
 _jb_exit_code = 0
 try:

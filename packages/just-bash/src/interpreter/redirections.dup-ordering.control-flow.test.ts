@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { Bash } from "../Bash.js";
+import { defineCommand } from "../custom-commands.js";
+
+// Hands back both streams with no recorded order, as a custom command does.
+const both = defineCommand("both", async () => ({
+  stdout: "O\n",
+  stderr: "E\n",
+  exitCode: 0,
+}));
 
 /**
  * Compound commands relay their body's output through their own accumulator,
@@ -69,6 +77,18 @@ describe("fd duplication ordering through control flow", () => {
     await env.exec("for i in 1 2; do echo O$i; echo E$i 1>&2; done > /f 2>&1");
     const f = await env.exec("cat /f");
     expect(f.stdout).toBe("O1\nE1\nO2\nE2\n");
+  });
+
+  it.each([
+    "for i in 1; do both; echo X; done 2>&1",
+    "i=0; while [ $i -lt 1 ]; do both; echo X; i=1; done 2>&1",
+    "if true; then both; echo X; fi 2>&1",
+    "case a in a) both; echo X;; esac 2>&1",
+    "{ both; echo X; } 2>&1",
+  ])("orders a command without a recorded order as one statement: %s", async (script) => {
+    const result = await new Bash({ customCommands: [both] }).exec(script);
+    expect(result.stdout).toBe("O\nE\nX\n");
+    expect(result.stderr).toBe("");
   });
 
   it("keeps the order of output written before a break", async () => {

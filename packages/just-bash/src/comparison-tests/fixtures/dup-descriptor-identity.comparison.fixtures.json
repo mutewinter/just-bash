@@ -103,6 +103,7 @@
     "files": {},
     "stdout": "rc=1\n",
     "stderr": "/bin/bash: 3: Bad file descriptor\n",
-    "exitCode": 0
+    "exitCode": 0,
+    "locked": true
   }
 }

@@ -49,6 +49,7 @@ export interface EvalContext {
   size: number; // file size in bytes
   mode: number; // file permission mode
   newerRefTimes: Map<string, number>; // reference file mtimes for -newer
+  now: number; // when the command started, the reference for -mtime and -mmin
   depth?: number; // depth in directory tree (for -printf %d)
   startingPoint?: string; // starting search path (for -printf %P)
 }

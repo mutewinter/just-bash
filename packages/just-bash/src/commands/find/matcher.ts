@@ -115,8 +115,7 @@ export function evaluateExpressionWithPrune(
     case "empty":
       return { matches: ctx.isEmpty, pruned: false, printed: false };
     case "mtime": {
-      const now = Date.now();
-      const fileAgeDays = (now - ctx.mtime) / (1000 * 60 * 60 * 24);
+      const fileAgeDays = (ctx.now - ctx.mtime) / (1000 * 60 * 60 * 24);
       let matches: boolean;
       if (expr.comparison === "more") {
         matches = fileAgeDays > expr.days;
@@ -128,14 +127,16 @@ export function evaluateExpressionWithPrune(
       return { matches, pruned: false, printed: false };
     }
     case "mmin": {
-      const fileAgeMinutes = (Date.now() - ctx.mtime) / (1000 * 60);
+      // Whole minutes, the fraction dropped before any comparison, as GNU
+      // find counts them: a file 30 seconds old is `-mmin 0`.
+      const fileAgeMinutes = Math.floor((ctx.now - ctx.mtime) / (1000 * 60));
       let matches: boolean;
       if (expr.comparison === "more") {
         matches = fileAgeMinutes > expr.minutes;
       } else if (expr.comparison === "less") {
         matches = fileAgeMinutes < expr.minutes;
       } else {
-        matches = Math.ceil(fileAgeMinutes) === expr.minutes;
+        matches = fileAgeMinutes === expr.minutes;
       }
       return { matches, pruned: false, printed: false };
     }
@@ -663,6 +664,7 @@ export function evaluateForEarlyPrune(
     size: 0,
     mode: 0,
     newerRefTimes: new Map(),
+    now: 0,
   };
 
   const result = evaluateExpressionWithPrune(expr, evalCtx);
@@ -694,6 +696,7 @@ function evaluatePruneBranchEarly(
           size: 0,
           mode: 0,
           newerRefTimes: new Map(),
+          now: 0,
         };
         const leftResult = evaluateExpressionWithPrune(expr.left, evalCtx);
         if (leftResult.pruned) {
@@ -720,6 +723,7 @@ function evaluatePruneBranchEarly(
           size: 0,
           mode: 0,
           newerRefTimes: new Map(),
+          now: 0,
         };
         const result = evaluateExpressionWithPrune(expr, evalCtx);
         return { shouldPrune: result.pruned };
@@ -736,6 +740,7 @@ function evaluatePruneBranchEarly(
           size: 0,
           mode: 0,
           newerRefTimes: new Map(),
+          now: 0,
         };
         const leftResult = evaluateExpressionWithPrune(expr.left, evalCtx);
         // If left doesn't match, AND will be false, no pruning

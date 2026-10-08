@@ -1,5 +1,6 @@
 // Parser for find expressions
 
+import { parseBareISOInTimezone } from "../date/date.js";
 import type { Expression, ParseResult, SizeUnit } from "./types.js";
 
 // Token types for parsing
@@ -13,6 +14,7 @@ type Token =
 export function parseExpressions(
   args: string[],
   startIndex: number,
+  options: { tz?: string } = {},
 ): ParseResult {
   // Parse into tokens: expressions, operators, negations, and parentheses
   const tokens: Token[] = [];
@@ -130,7 +132,7 @@ export function parseExpressions(
     } else if (arg === "-newermt") {
       if (i + 1 >= args.length) return missingArgument(arg);
       const dateArg = args[++i];
-      const time = parseDateArgument(dateArg);
+      const time = parseDateArgument(dateArg, options.tz);
       if (time === undefined) {
         return {
           expr: null,
@@ -441,40 +443,48 @@ function containsNegatedDelete(expr: Expression, negated = false): boolean {
 }
 
 /**
- * Read a -newermt date the way GNU find does for the common forms: a date
- * alone (`2026-09-20`) or with a time (`2026-09-20 14:30`, `2026-09-20T14:30:00`)
- * is local time, and anything carrying a zone (`Z`, `+02:00`) is that zone.
- * Returns ms since the epoch, or undefined for a string it cannot read.
+ * Read a -newermt date: a date alone (`2026-09-20`) or with a time
+ * (`2026-09-20 14:30`, `2026-09-20T14:30:00`) is wall-clock time in `tz`, or
+ * in UTC without one, and an ISO string carrying `Z` or an offset is that
+ * instant. Returns ms since the epoch, or undefined for a string it cannot
+ * read or a date or time that does not exist (`2026-02-31`, `10:60`).
  */
-export function parseDateArgument(value: string): number | undefined {
-  const local =
-    /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?)?$/.exec(
-      value.trim(),
-    );
-  if (local) {
-    const [, y, mo, d, h = "0", mi = "0", sec = "0", frac = "0"] = local;
-    const date = new Date(
+function parseDateArgument(value: string, tz?: string): number | undefined {
+  const text = value.trim();
+  const bare =
+    /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(text);
+  if (bare) {
+    const [, y, mo, d, h = "00", mi = "00", sec = "00"] = bare;
+    const wall = Date.UTC(
       Number(y),
       Number(mo) - 1,
       Number(d),
       Number(h),
       Number(mi),
       Number(sec),
-      Number(frac.padEnd(3, "0")),
     );
-    // Reject rollovers such as 2026-02-31, which Date would carry into March.
+    // Date.UTC carries an overflow into the next field (2026-02-31 is March
+    // 3rd, 10:60 is 11:00), so a component that did not survive is invalid.
+    const check = new Date(wall);
     if (
-      date.getFullYear() !== Number(y) ||
-      date.getMonth() !== Number(mo) - 1 ||
-      date.getDate() !== Number(d)
+      check.getUTCFullYear() !== Number(y) ||
+      check.getUTCMonth() !== Number(mo) - 1 ||
+      check.getUTCDate() !== Number(d) ||
+      check.getUTCHours() !== Number(h) ||
+      check.getUTCMinutes() !== Number(mi) ||
+      check.getUTCSeconds() !== Number(sec)
     ) {
       return undefined;
     }
-    return date.getTime();
+    if (!tz) return wall;
+    return parseBareISOInTimezone(
+      `${y}-${mo}-${d}T${h}:${mi}:${sec}`,
+      tz,
+    )?.getTime();
   }
-  if (!/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:?\d{2})$/.test(value.trim())) {
+  if (!/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:?\d{2})$/.test(text)) {
     return undefined;
   }
-  const time = Date.parse(value.trim());
+  const time = Date.parse(text);
   return Number.isNaN(time) ? undefined : time;
 }

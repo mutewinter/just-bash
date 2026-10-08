@@ -67,6 +67,8 @@ never execute guest-provided JavaScript.
 Every invocation is bound by `maxExecutionTimeMs`. On cancellation, just-bash
 revokes the command context immediately; `maxExtensionCleanupTimeMs` only
 bounds how long it waits for the now-authority-free command promise to settle.
+A command that is still resolving, such as one whose module is loading, is
+never started and reports cancellation immediately instead.
 A late continuation cannot use `ctx.fs`, `ctx.env`, `ctx.exec`, or other context
 capabilities. Cleanup work that must run at scope closure can be registered with
 `ctx.executionScope.registerCleanup()`. A cleanup failure is returned as a
@@ -82,7 +84,7 @@ duplicating internal defaults.
 
 ### File Operations
 
-`cat`, `cp`, `file`, `ln`, `ls`, `mkdir`, `mv`, `readlink`, `rm`, `rmdir`, `split`, `stat`, `touch`, `tree`
+`cat`, `cp`, `file`, `ln`, `ls`, `mkdir`, `mktemp`, `mv`, `readlink`, `rm`, `rmdir`, `split`, `stat`, `touch`, `tree`
 
 ### Text Processing
 
@@ -106,7 +108,7 @@ duplicating internal defaults.
 
 ### Shell Utilities
 
-`alias`, `bash`, `chmod`, `clear`, `date`, `expr`, `false`, `help`, `history`, `seq`, `sh`, `sleep`, `time`, `timeout`, `true`, `unalias`, `which`, `whoami`
+`alias`, `bash`, `chmod`, `clear`, `date`, `expr`, `false`, `help`, `history`, `seq`, `sh`, `sleep`, `time`, `timeout`, `true`, `unalias`, `which`, `whoami`, `yes`
 
 ### Network
 
@@ -634,6 +636,7 @@ Options:
 - `-c <script>` - Execute script from argument
 - `--root <path>` - Root directory (default: current directory)
 - `--cwd <path>` - Working directory in sandbox
+- `--allow-write` - Allow write operations (in memory only; read-only by default)
 - `-e, --errexit` - Exit on first error
 - `--json` - Output as JSON
 
@@ -643,10 +646,10 @@ Options:
 pnpm shell
 ```
 
-The interactive shell has full internet access by default. Disable with `--no-network`:
+The interactive shell has network access disabled by default. Enable it with `--network`:
 
 ```bash
-pnpm shell --no-network
+pnpm shell --network
 ```
 
 ## Execution Protection

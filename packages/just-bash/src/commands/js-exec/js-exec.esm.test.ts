@@ -254,6 +254,18 @@ describe("js-exec ESM modules", () => {
         "console.log(typeof import.meta);\n",
         "object\n",
       ],
+      [
+        "a .js file exporting after another statement",
+        "/home/user/late.js",
+        "const n = 1; export { n };\nconsole.log(n);\n",
+        "1\n",
+      ],
+      [
+        "a .js file with a comment inside an import",
+        "/home/user/comment.js",
+        "import /* fs */ fs from 'fs';\nconsole.log(typeof fs.readFileSync);\n",
+        "function\n",
+      ],
     ])("runs %s as a module", async (_name, file, source, stdout) => {
       const env = new Bash({ javascript: true, files: { [file]: source } });
       const result = await env.exec(`js-exec ${file}`);
@@ -296,6 +308,18 @@ describe("js-exec ESM modules", () => {
         "/home/user/c.cjs",
         "const text = `\nimport x from 'y'\n`;\nconsole.log(text.length);\nreturn;\n",
         "19\n",
+      ],
+      [
+        "import.meta in a string and a comment",
+        "/home/user/str.js",
+        "// reads import.meta\nconst s = 'import.meta';\nconsole.log(s);\nreturn;\n",
+        "import.meta\n",
+      ],
+      [
+        "an export line in a template literal",
+        "/home/user/tpl.js",
+        "const text = `\nexport { n }\n`;\nconsole.log(text.length);\nreturn;\n",
+        "14\n",
       ],
     ])("keeps function-body mode for %s", async (_name, file, source, stdout) => {
       const env = new Bash({ javascript: true, files: { [file]: source } });

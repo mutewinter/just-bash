@@ -4,6 +4,7 @@ import { decodeBytesToUtf8 } from "../../encoding.js";
 import { sanitizeErrorMessage } from "../../fs/sanitize-error.js";
 import type { ExecResult, RuntimeCommand } from "../../types.js";
 import { hasHelpFlag } from "../help.js";
+import { hasModuleSyntax } from "./module-syntax.js";
 import { executeWithRun } from "./run-runtime.js";
 
 const JS_EXEC_HELP = `js-exec - Sandboxed JavaScript/TypeScript runtime with Node.js-compatible APIs
@@ -45,15 +46,6 @@ Limits:
   Timeout: configurable via maxJsTimeoutMs
   Engine: run (QuickJS)
 `;
-
-/**
- * A line opening with a static `import` or `export`, or `import.meta`
- * anywhere: syntax only a module accepts, which Node uses to run a `.js` file
- * or `-e` code as ESM. A dynamic import call is valid in a script and does
- * not count.
- */
-const MODULE_SYNTAX =
-  /^[ \t]*(?:import[ \t]+[\w$*{"']|import[ \t]*[{*"']|export[ \t]+[\w$*{]|export[ \t]*[{*])|\bimport\.meta\b/m;
 
 interface ParsedArgs {
   code: string | null;
@@ -176,7 +168,7 @@ export const jsExecCommand: RuntimeCommand = {
       scriptPath.endsWith(".mjs") ||
       scriptPath.endsWith(".mts") ||
       scriptPath.endsWith(".ts") ||
-      (!scriptPath.endsWith(".cjs") && MODULE_SYNTAX.test(source));
+      (!scriptPath.endsWith(".cjs") && hasModuleSyntax(source));
     return await executeWithRun(
       {
         bootstrapCode: ctx.jsBootstrapCode,

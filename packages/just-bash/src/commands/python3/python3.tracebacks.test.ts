@@ -166,6 +166,34 @@ EOF`);
     expect(loaded.stdout).toBe("False\n");
   });
 
+  it("formats with the standard library when the program writes modules into /tmp", async () => {
+    const env = new Bash({ python: true });
+    await env.exec(
+      "mkdir -p /tmp/plant && for m in tokenize linecache textwrap _colorize ast; do echo 'print(\"planted\")' > /tmp/$m.py; done",
+    );
+    await env.exec(`cat > /tmp/plant/main.py << 'EOF'
+def fail():
+    raise ValueError("boom")
+
+fail()
+EOF`);
+    const result = await env.exec("python3 /tmp/plant/main.py");
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe(
+      [
+        "Traceback (most recent call last):",
+        '  File "/tmp/plant/main.py", line 4, in <module>',
+        "    fail()",
+        "    ~~~~^^",
+        '  File "/tmp/plant/main.py", line 2, in fail',
+        '    raise ValueError("boom")',
+        "ValueError: boom",
+        "",
+      ].join("\n"),
+    );
+    expect(result.exitCode).toBe(1);
+  });
+
   it("puts the absolute launch directory on sys.path for -m", async () => {
     const env = new Bash({ python: true });
     await env.exec(

@@ -1520,17 +1520,20 @@ exec(_jb_code, _jb_main.__dict__)
   // The traceback module is imported, and sys.path saved, before the
   // program's directory goes on sys.path, so a traceback.py (or any module the
   // formatter imports lazily) beside the program cannot replace the formatter.
-  // The formatter keeps the modules that import loaded, but they leave
-  // sys.modules, so the program's own imports search sys.path as under
-  // CPython and find a traceback.py beside it first.
+  // The modules that import loaded leave sys.modules while the program runs,
+  // so its own imports search sys.path as under CPython and find a
+  // traceback.py beside it first, and go back in before anything is printed.
+  // The saved sys.path leaves out the wrapper's own directory, /tmp, which the
+  // path hook would resolve to the program's /tmp.
   const wrappedCode = `
 import sys
 _jb_loaded = set(sys.modules)
 import traceback as _jb_traceback
+_jb_formatter_modules = {}
 for _jb_name in set(sys.modules) - _jb_loaded:
-    del sys.modules[_jb_name]
+    _jb_formatter_modules[_jb_name] = sys.modules.pop(_jb_name)
 del _jb_loaded
-_jb_sys_path = list(sys.path)
+_jb_sys_path = sys.path[1:]
 _jb_exit_code = 0
 try:
 ${setupCode
@@ -1555,6 +1558,7 @@ except SystemExit as e:
         _jb_exit_code = 1
 except Exception as e:
     sys.path = _jb_sys_path
+    sys.modules.update(_jb_formatter_modules)
     # The outermost frame is this wrapper's; the program's frames follow it.
     # A compile-time error has no program frame at all, and prints as CPython
     # prints a SyntaxError, from the exception alone.

@@ -3,9 +3,11 @@ import { resolveTimezoneAt } from "./posix-timezone.js";
 /**
  * Timezone-aware parsing shared by the commands that accept a date.
  *
- * The sandbox default is UTC: the host timezone never leaks unless the caller
- * opts in by setting `$TZ`. `date` and `touch` both resolve `$TZ` the same way,
- * so a stamp written by one is read back the same way by the other.
+ * `date` and `touch` both resolve `$TZ` the same way, as a zone Intl accepts
+ * or a POSIX TZ string, so a stamp written by one is read back the same way by
+ * the other. Without `$TZ`, both hand a zone-less spelling to the JS date
+ * parser, which reads a bare date as UTC and a date with a time as host-local;
+ * `touch -t`, which `date` has no counterpart for, reads in UTC.
  */
 
 /**
@@ -28,11 +30,15 @@ export function isValidTimezone(tz: string): boolean {
  * Returns null if Intl rejects the timezone or produces an unparseable date.
  */
 function tzShownAsUtc(d: Date, tz: string): Date | null {
-  // A POSIX TZ string resolves to the fixed offset it has at this instant.
-  const zone = resolveTimezoneAt(tz, d.getTime());
-  if (zone === null) return null;
+  const resolved = resolveTimezoneAt(tz, d.getTime());
+  if (resolved === null) return null;
+  // A POSIX TZ string resolves to the offset it has at this instant, which
+  // is applied directly rather than handed to Intl as a zone.
+  if (!("zone" in resolved)) {
+    return new Date(d.getTime() + resolved.offsetSeconds * 1000);
+  }
   const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: zone,
+    timeZone: resolved.zone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -109,11 +115,16 @@ export function currentYearInTimezone(
   now: Date = new Date(),
 ): number {
   if (!tz) return now.getUTCFullYear();
-  const zone = resolveTimezoneAt(tz, now.getTime());
-  if (zone === null) return now.getUTCFullYear();
+  const resolved = resolveTimezoneAt(tz, now.getTime());
+  if (resolved === null) return now.getUTCFullYear();
+  if (!("zone" in resolved)) {
+    return new Date(
+      now.getTime() + resolved.offsetSeconds * 1000,
+    ).getUTCFullYear();
+  }
   try {
     const year = new Intl.DateTimeFormat("en-US", {
-      timeZone: zone,
+      timeZone: resolved.zone,
       year: "numeric",
     }).format(now);
     return Number.parseInt(year, 10) || now.getUTCFullYear();

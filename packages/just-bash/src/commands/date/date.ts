@@ -8,6 +8,7 @@ import type {
   RuntimeCommandContext,
 } from "../../types.js";
 import { hasHelpFlag, showHelp, unknownOption } from "../help.js";
+import { resolveTimezoneAt } from "../posix-timezone.js";
 import { formatStrftime } from "../printf/strftime.js";
 import {
   hasExplicitZone,
@@ -93,13 +94,18 @@ export const dateCommand: RuntimeCommand = {
     //   $TZ=<valid zone>    -> that zone (validated by isValidTimezone).
     //   $TZ=<invalid zone>  -> UTC fallback (consistent with no-TZ default;
     //                          avoids %Z / %z disagreeing with the displayed
-    //                          time parts).
+    //                          time parts). A POSIX TZ string such as `EST5`
+    //                          is one of these for display.
     // parseTz keeps its raw value (undefined when unset) so timezone-naive -d
     // strings without $TZ fall through to JS `new Date(s)` — do NOT propagate
-    // the UTC display default into parsing.
-    let parseTz = ctx.env.get("TZ");
-    if (parseTz && !isValidTimezone(parseTz)) parseTz = undefined;
-    const displayTz = utc ? "UTC" : (parseTz ?? "UTC");
+    // the UTC display default into parsing. It accepts a POSIX TZ string, as
+    // `touch` does, so the two read a zone-less spelling as the same instant.
+    const envTz = ctx.env.get("TZ");
+    const parseTz =
+      envTz && resolveTimezoneAt(envTz, Date.now()) !== null
+        ? envTz
+        : undefined;
+    const displayTz = utc || !envTz || !isValidTimezone(envTz) ? "UTC" : envTz;
 
     const date = dateStr !== null ? parseDate(dateStr, parseTz) : new Date();
     if (!date)

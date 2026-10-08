@@ -46,6 +46,9 @@ describe("touch -t", () => {
   it.each([
     ["EST5", "202601020304", "2026-01-02T08:04:00.000Z"],
     ["EST5EDT,M3.2.0,M11.1.0", "202607020304", "2026-07-02T07:04:00.000Z"],
+    ["<XST>-0:00:30", "202601020304", "2026-01-02T03:03:30.000Z"],
+    ["<-053030>5:30:30", "202601020304", "2026-01-02T08:34:30.000Z"],
+    ["XST-24", "202601020304", "2026-01-01T03:04:00.000Z"],
   ])("reads the stamp in a POSIX TZ=%s", async (tz, stamp, iso) => {
     const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
     const result = await bash.exec(`TZ='${tz}' touch -t ${stamp} /w/f.txt`);

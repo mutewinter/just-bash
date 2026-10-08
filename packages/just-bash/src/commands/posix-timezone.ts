@@ -1,9 +1,11 @@
 /**
  * POSIX `TZ` strings, the form glibc reads when `TZ` is not a zone name:
  * `EST5`, `<+0530>-5:30`, `EST5EDT,M3.2.0,M11.1.0`. Intl accepts IANA names
- * and fixed `+HH:MM` offsets but not this grammar, so a POSIX value is
- * resolved to the fixed offset it puts in effect at a given instant, which
- * Intl does accept.
+ * but not this grammar, so a POSIX value is resolved to the offset it puts in
+ * effect at a given instant, in seconds, and callers apply that offset
+ * themselves. Handing it to Intl as a `+HH:MM` zone would not work on every
+ * supported runtime (Node 20 rejects offset zones) and could not carry the
+ * seconds the grammar allows.
  */
 
 const SECONDS_PER_DAY = 86_400;
@@ -210,15 +212,6 @@ function offsetAt(rule: PosixRule, instantMs: number): number {
   return inDst ? dst.offset : rule.stdOffset;
 }
 
-/** `+HH:MM`, or null for an offset Intl cannot express. */
-function offsetZone(offset: number): string | null {
-  const magnitude = Math.abs(offset);
-  if (magnitude % 60 !== 0 || magnitude >= 24 * 3600) return null;
-  const hours = String(Math.floor(magnitude / 3600)).padStart(2, "0");
-  const minutes = String((magnitude % 3600) / 60).padStart(2, "0");
-  return `${offset < 0 ? "-" : "+"}${hours}:${minutes}`;
-}
-
 function isIntlTimezone(tz: string): boolean {
   try {
     new Intl.DateTimeFormat(undefined, { timeZone: tz });
@@ -229,15 +222,21 @@ function isIntlTimezone(tz: string): boolean {
 }
 
 /**
- * The zone Intl should use for `tz` at `instantMs`: `tz` itself when Intl
- * accepts it, the fixed offset a POSIX TZ string puts in effect at that
- * instant, or null when `tz` is neither.
+ * What `$TZ` resolves to at an instant: a zone Intl accepts, named as given,
+ * or the offset a POSIX TZ string puts in effect then, in seconds east of UTC.
+ */
+type ResolvedTimezone = { zone: string } | { offsetSeconds: number };
+
+/**
+ * Resolve `tz` at `instantMs`: `tz` itself when Intl accepts it, the offset a
+ * POSIX TZ string puts in effect at that instant, or null when `tz` is
+ * neither.
  */
 export function resolveTimezoneAt(
   tz: string,
   instantMs: number,
-): string | null {
-  if (isIntlTimezone(tz)) return tz;
+): ResolvedTimezone | null {
+  if (isIntlTimezone(tz)) return { zone: tz };
   const rule = parsePosixTimezone(tz);
-  return rule ? offsetZone(offsetAt(rule, instantMs)) : null;
+  return rule ? { offsetSeconds: offsetAt(rule, instantMs) } : null;
 }

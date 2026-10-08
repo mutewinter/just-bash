@@ -95,6 +95,17 @@ describe("stat -c directives", () => {
     expect(result.exitCode).toBe(0);
   });
 
+  it("truncates %y with a precision under an output limit the result fits", async () => {
+    const env = new Bash({
+      files: { "/test.txt": { content: "hello world", mtime: MTIME } },
+      executionLimits: { maxOutputSize: 3 },
+    });
+    const result = await env.exec("stat -c '%.2y' /test.txt");
+    expect(result.stdout).toBe("20\n");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+  });
+
   it("prints %% as a literal percent", async () => {
     const result = await envWithFile().exec("stat -c '100%%' /test.txt");
     expect(result.stdout).toBe("100%\n");
@@ -240,6 +251,31 @@ describe("stat -c POSIX TZ strings", () => {
       "<+0530>-5:30",
       "2024-01-15T09:17:14.764Z",
       "2024-01-15 14:47:14.764000000 +0530",
+    ],
+    [
+      "<XST>-0:00:30",
+      "2024-01-15T09:17:14.764Z",
+      "2024-01-15 09:17:44.764000000 +0000",
+    ],
+    [
+      "<XST>0:00:30",
+      "2024-01-15T09:17:14.764Z",
+      "2024-01-15 09:16:44.764000000 -0000",
+    ],
+    [
+      "<+053030>-5:30:30",
+      "2024-01-15T09:17:14.764Z",
+      "2024-01-15 14:47:44.764000000 +0530",
+    ],
+    [
+      "<-053030>5:30:30",
+      "2024-01-15T09:17:14.764Z",
+      "2024-01-15 03:46:44.764000000 -0530",
+    ],
+    [
+      "XST-24",
+      "2024-01-15T09:17:14.764Z",
+      "2024-01-16 09:17:14.764000000 +2400",
     ],
   ])("reads TZ=%s at %s", async (tz, mtime, expected) => {
     const env = new Bash({

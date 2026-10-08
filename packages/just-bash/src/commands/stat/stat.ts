@@ -44,18 +44,39 @@ const NANOSECONDS_PER_MILLISECOND = 1_000_000;
  * for a value it cannot parse. No `$TZ` is UTC, as in `date`, so the host
  * zone never leaks unless the caller opts in.
  */
-function formatTimestamp(
-  when: Date,
-  tz: string | undefined,
-  limits: { maxOperations: number; maxOutputBytes: number },
-): string {
-  const zone = (tz && resolveTimezoneAt(tz, when.getTime())) || "UTC";
-  const seconds = Math.floor(when.getTime() / 1000);
+function formatTimestamp(when: Date, tz: string | undefined): string {
+  // The two formats below have a fixed, short output, so they get their own
+  // small limit: charging them against the output limit would fail a FORMAT
+  // like `%.2y` whose truncated output fits.
+  const limits = { maxOperations: 64, maxOutputBytes: 64 };
+  const resolved = (tz && resolveTimezoneAt(tz, when.getTime())) || {
+    zone: "UTC",
+  };
   const nanoseconds = String(
     when.getMilliseconds() * NANOSECONDS_PER_MILLISECOND,
   ).padStart(9, "0");
-  const wall = formatStrftime("%Y-%m-%d %H:%M:%S", seconds, zone, limits);
-  const offset = formatStrftime("%z", seconds, zone, limits);
+  const seconds = Math.floor(when.getTime() / 1000);
+  if ("zone" in resolved) {
+    const wall = formatStrftime(
+      "%Y-%m-%d %H:%M:%S",
+      seconds,
+      resolved.zone,
+      limits,
+    );
+    const offset = formatStrftime("%z", seconds, resolved.zone, limits);
+    return `${wall}.${nanoseconds} ${offset}`;
+  }
+  // A POSIX offset is applied by hand: the wall clock is the UTC one shifted
+  // by it, and `%z` shows it in whole minutes, truncated as glibc does.
+  const { offsetSeconds } = resolved;
+  const wall = formatStrftime(
+    "%Y-%m-%d %H:%M:%S",
+    seconds + offsetSeconds,
+    "UTC",
+    limits,
+  );
+  const minutes = Math.trunc(Math.abs(offsetSeconds) / 60);
+  const offset = `${offsetSeconds < 0 ? "-" : "+"}${String(Math.floor(minutes / 60)).padStart(2, "0")}${String(minutes % 60).padStart(2, "0")}`;
   return `${wall}.${nanoseconds} ${offset}`;
 }
 
@@ -486,12 +507,7 @@ export const statCommand: RuntimeCommand = {
           const resolve = (directive: string) => {
             if (directive !== "y") return values.get(directive);
             if (wallClock === undefined) {
-              wallClock = text(
-                formatTimestamp(stat.mtime, timezone, {
-                  maxOperations: ctx.limits.maxLoopIterations,
-                  maxOutputBytes,
-                }),
-              );
+              wallClock = text(formatTimestamp(stat.mtime, timezone));
             }
             return wallClock;
           };

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { Bash } from "../../Bash.js";
+import { InMemoryFs } from "../../fs/in-memory-fs/in-memory-fs.js";
+import type { DirentEntry } from "../../fs/interface.js";
+import { MountableFs } from "../../fs/mountable-fs/mountable-fs.js";
 
 const manyFiles = (directory: string, count: number) =>
   Object.fromEntries(
@@ -239,6 +242,26 @@ describe("js-exec fs operations", () => {
       expect(result.exitCode).toBe(0);
     });
 
+    it("should pass only a Dirent's declared fields into the guest", async () => {
+      class ExtraFieldsFs extends InMemoryFs {
+        override async readdirWithFileTypes(
+          path: string,
+        ): Promise<DirentEntry[]> {
+          return (await super.readdirWithFileTypes(path)).map((entry) =>
+            Object.assign(entry, { hostPath: "/host/secret" }),
+          );
+        }
+      }
+      const fs = new ExtraFieldsFs();
+      await fs.writeFile("/home/user/a.txt", "a");
+      const env = new Bash({ fs, javascript: true });
+      const result = await env.exec(
+        `js-exec -c "console.log(fs.readdirSync('/home/user', { withFileTypes: true }).map((e) => e._kind.hostPath).join())"`,
+      );
+      expect(result.stdout).toBe("\n");
+      expect(result.exitCode).toBe(0);
+    });
+
     it("should keep the path as given in a Dirent's parentPath", async () => {
       const env = new Bash({
         javascript: true,
@@ -331,16 +354,46 @@ describe("js-exec fs operations", () => {
       expect(result.exitCode).toBe(0);
     });
 
-    it("should report an uncaught error at the script's own line", async () => {
+    it("should give EBUSY from a mount point its errno", async () => {
+      const fs = new MountableFs();
+      fs.mount("/mnt/data", new InMemoryFs());
+      const env = new Bash({ fs, javascript: true });
+      const result = await env.exec(
+        `js-exec -c "try { fs.rmSync('/mnt/data', { recursive: true }) } catch (e) { console.log(e.code, e.errno) }"`,
+      );
+      expect(result.stdout).toBe("EBUSY -16\n");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it.each([
+      [
+        "a script with no bootstrap",
+        "/work/fail.js",
+        true,
+        "/work/fail.js:2:9",
+      ],
+      [
+        "a script with a bootstrap",
+        "/work/fail.js",
+        { bootstrap: "globalThis.ready = true;" },
+        "/work/fail.js:2:9",
+      ],
+      [
+        "a module with a bootstrap",
+        "/work/fail.mjs",
+        { bootstrap: "globalThis.ready = true;" },
+        "<anonymous> (/work/fail.mjs:2:9)",
+      ],
+    ])("should report an uncaught error at the line of %s", async (_name, path, javascript, location) => {
       const env = new Bash({
-        javascript: true,
+        javascript,
         files: {
-          "/work/fail.js": "const x = 1;\nfs.statSync('/work/missing.txt');\n",
+          [path]: "const x = 1;\nfs.statSync('/work/missing.txt');\n",
         },
       });
-      const result = await env.exec("js-exec /work/fail.js");
+      const result = await env.exec(`js-exec ${path}`);
       expect(result.stderr).toBe(
-        "at /work/fail.js:2:9: ENOENT: no such file or directory, stat '/work/missing.txt'\n",
+        `at ${location}: ENOENT: no such file or directory, stat '/work/missing.txt'\n`,
       );
       expect(result.exitCode).toBe(1);
     });

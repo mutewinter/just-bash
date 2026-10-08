@@ -430,6 +430,18 @@ const guestConfigurationBytesWithinLimit = (
   return bytes;
 };
 
+/**
+ * Whether a frame is in the runtime's own shims, which sit above the script
+ * in the entry source, or in the bootstrap module, rather than in the
+ * script itself.
+ */
+const isSetupFrame = (
+  frame: GuestSourceLocation,
+  sourceLineOffset: number,
+): boolean =>
+  (frame.file === "run.js" && frame.line <= sourceLineOffset) ||
+  frame.file.startsWith("just-bash:bootstrap:");
+
 const formatGuestError = (
   error: unknown,
   options: RunJsOptions,
@@ -451,11 +463,8 @@ const formatGuestError = (
   // The runtime's own shims sit above the script in the entry source, or in
   // the bootstrap module, so a failure inside one of them (an fs call, say)
   // is reported at the first frame below them: the script's own line.
-  const location = parseGuestSourceLocation(
-    error.stack,
-    (frame) =>
-      (frame.file === "run.js" && frame.line <= sourceLineOffset) ||
-      frame.file.startsWith("just-bash:bootstrap:"),
+  const location = parseGuestSourceLocation(error.stack, (frame) =>
+    isSetupFrame(frame, sourceLineOffset),
   );
   if (location === undefined) return message;
 
@@ -521,9 +530,10 @@ const guestSetupSource = (
   // path as the caller wrote it in the message, and code, errno, syscall,
   // path (and dest) on the error, so \`error.code === 'ENOENT'\` works.
   var ERRNO = {
-    EACCES: -13, EBADF: -9, EEXIST: -17, EFBIG: -27, EINVAL: -22, EIO: -5,
-    EISDIR: -21, ELOOP: -40, EMFILE: -24, ENAMETOOLONG: -36, ENOENT: -2,
-    ENOSPC: -28, ENOTDIR: -20, ENOTEMPTY: -39, EPERM: -1, EROFS: -30, EXDEV: -18
+    EACCES: -13, EBADF: -9, EBUSY: -16, EEXIST: -17, EFBIG: -27, EINVAL: -22,
+    EIO: -5, EISDIR: -21, ELOOP: -40, EMFILE: -24, ENAMETOOLONG: -36,
+    ENOENT: -2, ENOSPC: -28, ENOTDIR: -20, ENOTEMPTY: -39, EPERM: -1,
+    EROFS: -30, EXDEV: -18
   };
   var ERRNO_MESSAGE = /^(E[A-Z0-9]+): (.*?)(?:, [a-z]+ '.*')?$/;
   function fsError(message, syscall, path, dest) {
@@ -1080,10 +1090,15 @@ async function executeWithRunInner(
               // The run's own signal, which js-exec's timeout aborts too.
               const { abortSignal } = getHostFunctionContext();
               if (!recursive) {
+                // Only the declared fields cross into the guest, whatever
+                // else a custom filesystem's entries carry.
                 return (await readdirWithTypes(ctx, resolved, abortSignal)).map(
                   (entry) => ({
-                    ...entry,
                     dir: "",
+                    isDirectory: entry.isDirectory,
+                    isFile: entry.isFile,
+                    isSymbolicLink: entry.isSymbolicLink,
+                    name: entry.name,
                   }),
                 );
               }
@@ -1413,13 +1428,21 @@ ${bootstrap}
       error instanceof Error && error.stack !== undefined
         ? parseGuestSourceLocation(error.stack)
         : undefined;
+    // A failure is the bootstrap's when it was thrown there and no frame
+    // of the script is below it; an fs call the script made throws from the
+    // shims too, and is the script's.
     const bootstrapSourceFailure =
       bootstrap !== "" &&
       errorLocation !== undefined &&
       (errorLocation.file === bootstrapModuleSpecifier ||
         (!options.isModule &&
           errorLocation.file === "run.js" &&
-          errorLocation.line <= sourceLineOffset));
+          errorLocation.line <= sourceLineOffset)) &&
+      error instanceof Error &&
+      error.stack !== undefined &&
+      parseGuestSourceLocation(error.stack, (frame) =>
+        isSetupFrame(frame, sourceLineOffset),
+      ) === undefined;
     if (requestedExitCode !== undefined) {
       output.exitCode = requestedExitCode;
     } else if (bridgeLimitExceeded || error instanceof RunBridgeLimitError) {

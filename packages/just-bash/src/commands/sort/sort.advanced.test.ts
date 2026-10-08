@@ -104,6 +104,17 @@ describe("sort -h (human numeric)", () => {
     const result = await env.exec("sort -k2 -h /test.txt");
     expect(result.stdout).toBe("b 2KiB used\na 10MiB used\nc 1GiB used\n");
   });
+
+  // Expected orders from GNU coreutils 9.12 `sort -h` on the same input.
+  it.each([
+    ["+2M foo\n3K bar\n1K\n", "", "+2M foo\n1K\n3K bar\n"],
+    ["+5\n3\n-2K\n1K\n", "", "-2K\n+5\n3\n1K\n"],
+    ["2M\n3K\n1G\n", "-f", "3K\n2M\n1G\n"],
+  ])("should sort %j with -h %s as GNU does", async (input, flags, expected) => {
+    const env = new Bash({ files: { "/test.txt": input } });
+    const result = await env.exec(`sort -h ${flags} /test.txt`);
+    expect(result.stdout).toBe(expected);
+  });
 });
 
 describe("sort -V (version)", () => {

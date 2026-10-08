@@ -39,6 +39,7 @@ function tzShownAsUtc(d: Date, tz: string): Date | null {
   }
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: resolved.zone,
+    era: "short",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -47,11 +48,18 @@ function tzShownAsUtc(d: Date, tz: string): Date | null {
     second: "2-digit",
     hour12: false,
   }).formatToParts(d);
-  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "00";
-  const h = Number.parseInt(get("hour"), 10) % 24;
-  const shown = new Date(
-    `${get("year")}-${get("month")}-${get("day")}T${String(h).padStart(2, "0")}:${get("minute")}:${get("second")}Z`,
+  const get = (t: string) =>
+    Number.parseInt(parts.find((p) => p.type === t)?.value ?? "0", 10);
+  // Intl writes a year below 1000 unpadded and one before 1 AD as BC, so the
+  // wall clock is assembled from numbers rather than parsed from a string.
+  const bc = parts.find((p) => p.type === "era")?.value === "BC";
+  const shown = new Date(0);
+  shown.setUTCFullYear(
+    bc ? 1 - get("year") : get("year"),
+    get("month") - 1,
+    get("day"),
   );
+  shown.setUTCHours(get("hour") % 24, get("minute"), get("second"), 0);
   return Number.isNaN(shown.getTime()) ? null : shown;
 }
 
@@ -69,13 +77,18 @@ function tzShownAsUtc(d: Date, tz: string): Date | null {
  * - Skipped wall times (spring-forward gap, e.g. America/New_York
  *   2024-03-10T02:30 does not exist): the loop oscillates and we return the
  *   last candidate. In practice this lands on the post-shift (EDT) instant
- *   for the gap.
+ *   for the gap. With `strict`, a wall time the zone never shows is null
+ *   instead, as `touch -t` rejects one.
  * - Ambiguous wall times (fall-back, e.g. America/New_York 2024-11-03T01:30
  *   occurs twice): the seed's first shift uses the offset at the requested
  *   components-as-UTC, which is still EDT for the November case, so the
  *   loop converges on the earlier (EDT) instant.
  */
-export function parseBareISOInTimezone(s: string, tz: string): Date | null {
+export function parseBareISOInTimezone(
+  s: string,
+  tz: string,
+  { strict = false }: { strict?: boolean } = {},
+): Date | null {
   const m = s.match(
     /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?)?$/,
   );
@@ -91,13 +104,18 @@ export function parseBareISOInTimezone(s: string, tz: string): Date | null {
   if (Number.isNaN(requested.getTime())) return null;
   try {
     let candidate = requested;
+    let converged = false;
     for (let pass = 0; pass < 3; pass++) {
       const shown = tzShownAsUtc(candidate, tz);
       if (shown === null) return null;
       const drift = shown.getTime() - requested.getTime();
-      if (drift === 0) break;
+      if (drift === 0) {
+        converged = true;
+        break;
+      }
       candidate = new Date(candidate.getTime() - drift);
     }
+    if (strict && !converged) return null;
     return new Date(candidate.getTime() + milliseconds);
   } catch {
     return null;

@@ -115,6 +115,36 @@ describe("touch -t", () => {
     expect(result.exitCode).toBe(1);
   });
 
+  it.each([
+    ["UTC", "000101010000", "0001-01-01T00:00:00.000Z"],
+    ["UTC", "000001010000", "0000-01-01T00:00:00.000Z"],
+    ["EST5", "000101010000", "0001-01-01T05:00:00.000Z"],
+  ])("reads an early year under TZ=%s in %s", async (tz, stamp, iso) => {
+    const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
+    const result = await bash.exec(`TZ=${tz} touch -t ${stamp} /w/f.txt`);
+    expect(result.exitCode).toBe(0);
+    expect((await mtimeOf(bash, "/w/f.txt")).toISOString()).toBe(iso);
+  });
+
+  it.each([
+    [":America/New_York", "2026-01-02T08:04:00.000Z"],
+    [":EST5", "2026-01-02T03:04:00.000Z"],
+  ])("reads TZ=%s as a zone name", async (tz, iso) => {
+    const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
+    const result = await bash.exec(`TZ='${tz}' touch -t 202601020304 /w/f.txt`);
+    expect(result.exitCode).toBe(0);
+    expect((await mtimeOf(bash, "/w/f.txt")).toISOString()).toBe(iso);
+  });
+
+  it("rejects a wall time a spring-forward gap skips", async () => {
+    const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
+    const result = await bash.exec(
+      "TZ=America/New_York touch -t 202403100230 /w/f.txt",
+    );
+    expect(result.stderr).toBe("touch: invalid date format '202403100230'\n");
+    expect(result.exitCode).toBe(1);
+  });
+
   it("reports a missing argument", async () => {
     const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
     const result = await bash.exec("touch -t");
@@ -292,5 +322,32 @@ describe("touch timestamp flag precedence", () => {
     const result = await bash.exec(`touch ${flags} /w/f.txt`);
     expect(result.exitCode).toBe(0);
     expect((await mtimeOf(bash, "/w/f.txt")).toISOString()).toBe(iso);
+  });
+});
+
+describe("touch -a", () => {
+  const OLD = new Date("2020-01-01T00:00:00.000Z");
+
+  it.each([
+    ["-a -t 202601020304", "2020-01-01T00:00:00.000Z"],
+    ["-a", "2020-01-01T00:00:00.000Z"],
+    ["-a -m -t 202601020304", "2026-01-02T03:04:00.000Z"],
+    ["-am -t 202601020304", "2026-01-02T03:04:00.000Z"],
+    ["-m -t 202601020304", "2026-01-02T03:04:00.000Z"],
+  ])("leaves the modification time alone only for -a alone: %s", async (flags, iso) => {
+    const bash = new Bash({
+      cwd: "/w",
+      files: { "/w/f.txt": { content: "", mtime: OLD } },
+    });
+    const result = await bash.exec(`touch ${flags} /w/f.txt`);
+    expect(result.exitCode).toBe(0);
+    expect((await mtimeOf(bash, "/w/f.txt")).toISOString()).toBe(iso);
+  });
+
+  it("still creates a missing file", async () => {
+    const bash = new Bash({ cwd: "/w", files: { "/w/f.txt": "" } });
+    const result = await bash.exec("touch -a -t 202601020304 /w/new.txt");
+    expect(result.exitCode).toBe(0);
+    expect(await bash.fs.exists("/w/new.txt")).toBe(true);
   });
 });

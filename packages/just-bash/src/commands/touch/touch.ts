@@ -94,7 +94,10 @@ function parseTimestampString(stamp: string, tz?: string): Date | null {
   const pad = (n: number) => String(n).padStart(2, "0");
   const wall = `${String(year).padStart(4, "0")}-${pad(month)}-${pad(day)}T${pad(hour)}:${pad(minute)}:${pad(second)}`;
 
-  const date = tz ? parseBareISOInTimezone(wall, tz) : new Date(`${wall}Z`);
+  // A wall time the zone skips, inside a spring-forward gap, is rejected.
+  const date = tz
+    ? parseBareISOInTimezone(wall, tz, { strict: true })
+    : new Date(`${wall}Z`);
   if (date === null || Number.isNaN(date.getTime())) return null;
 
   // Reject a day the month does not have, which Date would roll forward.
@@ -138,6 +141,8 @@ export const touchCommand: RuntimeCommand = {
     const files: string[] = [];
     let timeSource: TimeSource | null = null;
     let noCreate = false;
+    let accessTime = false;
+    let modificationTime = false;
 
     // Parse arguments
     for (let i = 0; i < args.length; i++) {
@@ -173,9 +178,10 @@ export const touchCommand: RuntimeCommand = {
           kind: arg === "-t" ? "stamp" : "reference",
           value: args[++i],
         };
-      } else if (arg === "-a" || arg === "-m") {
-        // The filesystem keeps only a modification time, so selecting which
-        // of the two to write has nothing to select between.
+      } else if (arg === "-a") {
+        accessTime = true;
+      } else if (arg === "-m") {
+        modificationTime = true;
       } else if (arg.startsWith("--")) {
         return unknownOption("touch", arg);
       } else if (arg.startsWith("-") && arg.length > 1) {
@@ -184,8 +190,10 @@ export const touchCommand: RuntimeCommand = {
         for (const char of arg.slice(1)) {
           if (char === "c") {
             noCreate = true;
-          } else if (char === "a" || char === "m") {
-            // Silently ignore
+          } else if (char === "a") {
+            accessTime = true;
+          } else if (char === "m") {
+            modificationTime = true;
           } else if (char === "d" || char === "t" || char === "r") {
             // Each of these consumes the next argument.
             if (i + 1 >= args.length) {
@@ -277,9 +285,14 @@ export const touchCommand: RuntimeCommand = {
           await ctx.fs.writeFile(fullPath, "");
         }
 
-        // Update timestamp if we have utimes support
-        const mtime = targetTime ?? new Date();
-        await ctx.fs.utimes(fullPath, mtime, mtime);
+        // `-a` without `-m` sets only the access time, so the modification
+        // time is written back as it was.
+        const time = targetTime ?? new Date();
+        const mtime =
+          accessTime && !modificationTime
+            ? new Date((await ctx.fs.stat(fullPath)).mtime.getTime())
+            : time;
+        await ctx.fs.utimes(fullPath, time, mtime);
       } catch (error) {
         // A limit, an abort or a security violation is not this file failing
         // to be touched; it has to keep going up.

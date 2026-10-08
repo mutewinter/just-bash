@@ -459,6 +459,14 @@ async function prepareRedirectionsWithState(
       setFdEntry(ctx, fd, entry);
     }
   };
+  // `&>`, `&>>`, and `>&word` open the file once for both fds, as `> f 2>&1`
+  // does, so a persistent one puts fd 2 in fd 1's alias group: a later result
+  // carrying both streams is then merged onto the one open in write order.
+  const persistBothStandard = (entry: FdEntry): void => {
+    persistStandard(1, entry);
+    persistStandard(2, entry);
+    if (transaction.policy === "persistent") dupFd(ctx, 2, 1);
+  };
   const bindTemporaryStandard = (fd: number, entry: FdEntry): void => {
     rebound(fd);
     standardRoutes.set(fd, entry);
@@ -941,8 +949,7 @@ async function prepareRedirectionsWithState(
           opened: true,
         });
         if (redir.fd == null) {
-          persistStandard(1, entry);
-          persistStandard(2, entry);
+          persistBothStandard(entry);
         } else {
           persistStandard(effectiveFd, entry);
         }
@@ -1064,8 +1071,7 @@ async function prepareRedirectionsWithState(
       const entry = openedHere(opened.entry as FdEntry);
       openedEntries.set(index, entry);
       if (redir.operator === "&>" || redir.operator === "&>>") {
-        persistStandard(1, entry);
-        persistStandard(2, entry);
+        persistBothStandard(entry);
       } else {
         persistStandard(effectiveFd, entry);
       }

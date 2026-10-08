@@ -258,6 +258,19 @@ describe("fd duplication descriptor identity", () => {
   });
 });
 
+describe("a self-move", () => {
+  // `3>&3-` moves fd 3 onto itself, which bash treats as a no-op, so the two
+  // dups around it are still on one open.
+  it.each([
+    ["exec 3> /f; { printf O; printf E 1>&2; } 1>&3 3>&3- 2>&3"],
+    ["{ printf O; printf E 1>&2; } 3> /f 1>&3 3>&3- 2>&3"],
+  ])("keeps the dups around it on one open: %s", async (script) => {
+    const env = new Bash();
+    await env.exec(script);
+    expect(await env.readFile("/f")).toBe("OE");
+  });
+});
+
 describe("persistent duplication of a standard fd", () => {
   // `exec > f 2>&1` puts fd 2 on fd 1's open. A later result that carries
   // both streams at once, which a nested shell hands back, is then one
@@ -266,6 +279,9 @@ describe("persistent duplication of a standard fd", () => {
     ["exec > /f 2>&1"],
     ["exec 3> /f; exec 1>&3 2>&1"],
     ["exec > /f; exec 2>&1"],
+    ["exec &> /f"],
+    ["exec &>> /f"],
+    ["exec >& /f"],
   ])("merges a nested shell's streams after %s", async (setup) => {
     const env = new Bash();
     await env.exec(`${setup}; bash -c 'echo O1; echo E1 1>&2; echo O2'`);

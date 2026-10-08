@@ -178,6 +178,8 @@ describe("stat -c flags and precision", () => {
     ["[%015.3Y]", "[01705310234.764]"],
     ["[%4.3Y]", "[1705310234.764]"],
     ["[%.3W]", "[0.000]"],
+    ["[%5.3W]", "[0.000]"],
+    ["[%6.3W]", "[ 0.000]"],
   ])("formats seconds since the epoch as %s", async (format, expected) => {
     const result = await envWithFile().exec(`stat -c "${format}" /test.txt`);
     expect(result.stdout).toBe(`${expected}\n`);
@@ -200,6 +202,61 @@ describe("stat -c flags and precision", () => {
   it("prints %% after a bare percent and a trailing percent as itself", async () => {
     const result = await envWithFile().exec("stat -c '%%%' /test.txt");
     expect(result.stdout).toBe("%%\n");
+    expect(result.exitCode).toBe(0);
+  });
+});
+
+// Expected values from GNU coreutils 9.12 `gstat`.
+describe("stat -c on edge values", () => {
+  it.each([
+    ["[%.1Y]", "[-1.0]"],
+    ["[%.2Y]", "[-1.00]"],
+    ["[%.3Y]", "[-0.001]"],
+    ["[%Y]", "[-1]"],
+  ])("formats a mtime 1ms before the epoch as %s", async (format, expected) => {
+    const env = new Bash({
+      files: { "/f": { content: "", mtime: new Date(-1) } },
+    });
+    const result = await env.exec(`stat -c "${format}" /f`);
+    expect(result.stdout).toBe(`${expected}\n`);
+    expect(result.exitCode).toBe(0);
+  });
+
+  // GNU's `%.1n` prints the first byte of `é` alone; a string cannot hold
+  // half a character, so the character is dropped.
+  it.each([
+    ["[%3n]", "[ é]"],
+    ["[%5n]", "[   é]"],
+    ["[%-4n]", "[é  ]"],
+    ["[%.2n]", "[é]"],
+    ["[%.1n]", "[]"],
+  ])("counts %s in bytes for a multibyte name", async (format, expected) => {
+    const env = new Bash({ cwd: "/", files: { "/é": "" } });
+    const result = await env.exec(`stat -c "${format}" é`);
+    expect(result.stdout).toBe(`${expected}\n`);
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("escapes a single quote in %N", async () => {
+    const env = new Bash({ cwd: "/", files: { "/a';id;'b": "" } });
+    const result = await env.exec(`stat -c '%N' "a';id;'b"`);
+    expect(result.stdout).toBe("'a'\\'';id;'\\''b'\n");
+    expect(result.exitCode).toBe(0);
+  });
+
+  it.each([
+    [":America/New_York", "2024-01-15 04:17:14.764000000 -0500"],
+    [":EST5", "2024-01-15 09:17:14.764000000 +0000"],
+    [":", "2024-01-15 09:17:14.764000000 +0000"],
+  ])("reads TZ=%s as a zone name", async (tz, expected) => {
+    const env = new Bash({
+      files: {
+        "/f": { content: "", mtime: new Date("2024-01-15T09:17:14.764Z") },
+      },
+      env: { TZ: tz },
+    });
+    const result = await env.exec("stat -c '%y' /f");
+    expect(result.stdout).toBe(`${expected}\n`);
     expect(result.exitCode).toBe(0);
   });
 });

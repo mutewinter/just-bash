@@ -142,6 +142,22 @@ function pad(
   return left ? text + padding : padding + text;
 }
 
+/**
+ * The longest prefix of `text` that fits in `bytes` UTF-8 bytes. C printf
+ * would cut a multibyte character in half; a string cannot hold half of one,
+ * so the whole character is dropped instead.
+ */
+function truncateToBytes(text: string, bytes: number): string {
+  let used = 0;
+  let end = 0;
+  for (const char of text) {
+    used += utf8ByteLength(char);
+    if (used > bytes) break;
+    end += char.length;
+  }
+  return text.slice(0, end);
+}
+
 /** C printf's integer conversion: precision as minimum digits, then width. */
 function formatInteger(
   digits: string,
@@ -282,12 +298,16 @@ function formatValue(
 ): string {
   switch (value.kind) {
     case "string": {
+      // C printf counts a string's precision and width in bytes.
       const precision = precisionDigits(spec.precision);
       const text =
-        precision === null ? value.text : value.text.slice(0, precision);
+        precision === null
+          ? value.text
+          : truncateToBytes(value.text, precision);
       if (spec.width === null) return text;
       const left = keepFlags(spec.flags, STRING_FLAGS).includes("-");
-      return pad(text, spec.width, " ", left, maxOutputBytes);
+      const multibyteExtra = utf8ByteLength(text) - text.length;
+      return pad(text, spec.width - multibyteExtra, " ", left, maxOutputBytes);
     }
     case "uint":
       return formatInteger(
@@ -471,7 +491,9 @@ export const statCommand: RuntimeCommand = {
           const mtime = stat.mtime.getTime();
           const values = new Map<string, StatValue>([
             ["n", text(file)],
-            ["N", text(`'${file}'`)],
+            // Quoted for a shell, with an embedded `'` closed, escaped and
+            // reopened, so the result is safe to paste back as one word.
+            ["N", text(`'${file.replaceAll("'", "'\\''")}'`)],
             ["s", { kind: "uint", value: stat.size }],
             ["F", text(stat.isDirectory ? "directory" : "regular file")],
             ["a", { kind: "octal", value: stat.mode & 0o7777 }],

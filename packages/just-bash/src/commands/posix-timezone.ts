@@ -230,12 +230,17 @@ type ResolvedTimezone = { zone: string } | { offsetSeconds: number };
 /**
  * Resolve `tz` at `instantMs`: `tz` itself when Intl accepts it, the offset a
  * POSIX TZ string puts in effect at that instant, or null when `tz` is
- * neither.
+ * neither. A leading `:` names a zone file in glibc, so what follows it is
+ * read as a zone name only.
  */
 export function resolveTimezoneAt(
   tz: string,
   instantMs: number,
 ): ResolvedTimezone | null {
+  if (tz.startsWith(":")) {
+    const name = tz.slice(1);
+    return isIntlTimezone(name) ? { zone: name } : null;
+  }
   if (isIntlTimezone(tz)) return { zone: tz };
   const rule = parsePosixTimezone(tz);
   return rule ? { offsetSeconds: offsetAt(rule, instantMs) } : null;

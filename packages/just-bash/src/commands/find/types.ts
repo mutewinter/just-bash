@@ -8,7 +8,9 @@ export type Expression =
   | { type: "type"; fileType: "f" | "d" }
   | { type: "empty" }
   | { type: "mtime"; days: number; comparison: "exact" | "more" | "less" }
+  | { type: "mmin"; minutes: number; comparison: "exact" | "more" | "less" }
   | { type: "newer"; refPath: string }
+  | { type: "newermt"; time: number } // reference time in ms since the epoch
   | {
       type: "size";
       value: number;

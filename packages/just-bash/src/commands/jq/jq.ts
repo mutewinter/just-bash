@@ -5,7 +5,6 @@
  */
 
 import { decodeBytesToUtf8 } from "../../encoding.js";
-import { rethrowCommandLimit } from "../../fatal-execution-error.js";
 import { sanitizeErrorMessage } from "../../fs/sanitize-error.js";
 import { ExecutionLimitError } from "../../interpreter/errors.js";
 import {
@@ -627,7 +626,12 @@ export const jqCommand: RuntimeCommand = {
         throw e;
       }
       if (e instanceof ExecutionLimitError) {
-        rethrowCommandLimit("jq", e);
+        throw new ExecutionLimitError(
+          e.message,
+          e.limitType,
+          "",
+          `jq: ${sanitizeErrorMessage(e.message)}\n`,
+        );
       }
       const msg = sanitizeErrorMessage((e as Error).message);
       if (msg.includes("Unknown function")) {

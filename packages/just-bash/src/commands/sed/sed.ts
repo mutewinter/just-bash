@@ -1,5 +1,5 @@
 import { decodeBytesToUtf8 } from "../../encoding.js";
-import { rethrowCommandLimit } from "../../fatal-execution-error.js";
+import { sanitizeErrorMessage } from "../../fs/sanitize-error.js";
 import { ExecutionLimitError } from "../../interpreter/errors.js";
 import type { ExecutionLimits } from "../../limits.js";
 import {
@@ -524,7 +524,12 @@ export const sedCommand: RuntimeCommand = {
             throw e;
           }
           if (e instanceof ExecutionLimitError) {
-            rethrowCommandLimit("sed", e);
+            throw new ExecutionLimitError(
+              e.message,
+              e.limitType,
+              "",
+              `sed: ${sanitizeErrorMessage(e.message)}\n`,
+            );
           }
           return {
             stdout: "",
@@ -564,7 +569,12 @@ export const sedCommand: RuntimeCommand = {
           throw e;
         }
         if (e instanceof ExecutionLimitError) {
-          rethrowCommandLimit("sed", e);
+          throw new ExecutionLimitError(
+            e.message,
+            e.limitType,
+            "",
+            `sed: ${sanitizeErrorMessage(e.message)}\n`,
+          );
         }
         throw e;
       }
@@ -594,7 +604,12 @@ export const sedCommand: RuntimeCommand = {
             throw e;
           }
           if (e instanceof ExecutionLimitError) {
-            rethrowCommandLimit("sed", e);
+            throw new ExecutionLimitError(
+              e.message,
+              e.limitType,
+              "",
+              `sed: ${sanitizeErrorMessage(e.message)}\n`,
+            );
           }
           return {
             stdout: "",
@@ -636,7 +651,12 @@ export const sedCommand: RuntimeCommand = {
         throw e;
       }
       if (e instanceof ExecutionLimitError) {
-        rethrowCommandLimit("sed", e);
+        throw new ExecutionLimitError(
+          e.message,
+          e.limitType,
+          "",
+          `sed: ${sanitizeErrorMessage(e.message)}\n`,
+        );
       }
       throw e;
     }

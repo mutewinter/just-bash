@@ -5,7 +5,10 @@
  */
 
 import { decodeBytesToUtf8 } from "../../encoding.js";
-import { rethrowFatalExecutionError } from "../../fatal-execution-error.js";
+import {
+  rethrowCommandLimit,
+  rethrowFatalExecutionError,
+} from "../../fatal-execution-error.js";
 import { mapToRecord } from "../../helpers/env.js";
 import { ExecutionLimitError } from "../../interpreter/errors.js";
 import { ConstantRegex, createUserRegex } from "../../regex/index.js";
@@ -338,14 +341,15 @@ export const awkCommand2: RuntimeCommand = {
       if (e instanceof SecurityViolationError) {
         throw e;
       }
+      if (e instanceof ExecutionLimitError) {
+        rethrowCommandLimit("awk", e, interp.getOutput());
+      }
       // Handle errors during execution
       const msg = e instanceof Error ? e.message : String(e);
-      const exitCode =
-        e instanceof ExecutionLimitError ? ExecutionLimitError.EXIT_CODE : 2;
       return {
         stdout: interp.getOutput(),
         stderr: `awk: ${msg}\n`,
-        exitCode,
+        exitCode: 2,
       };
     }
   },

@@ -10,6 +10,7 @@
 
 import { BoundedStringBuilder } from "../../bounded-builder.js";
 import { decodeBytesToUtf8 } from "../../encoding.js";
+import { rethrowCommandLimit } from "../../fatal-execution-error.js";
 import { sanitizeErrorMessage } from "../../fs/sanitize-error.js";
 import { ExecutionLimitError } from "../../interpreter/errors.js";
 import {
@@ -481,12 +482,7 @@ export const yqCommand: RuntimeCommand = {
         throw e;
       }
       if (e instanceof ExecutionLimitError) {
-        const message = sanitizeErrorMessage(e.message);
-        return {
-          stdout: "",
-          stderr: `yq: ${message}\n`,
-          exitCode: ExecutionLimitError.EXIT_CODE,
-        };
+        rethrowCommandLimit("yq", e);
       }
       const msg = sanitizeErrorMessage((e as Error).message);
       if (msg.includes("Unknown function")) {

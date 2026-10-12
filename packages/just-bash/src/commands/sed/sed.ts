@@ -1,5 +1,5 @@
 import { decodeBytesToUtf8 } from "../../encoding.js";
-import { sanitizeErrorMessage } from "../../fs/sanitize-error.js";
+import { rethrowCommandLimit } from "../../fatal-execution-error.js";
 import { ExecutionLimitError } from "../../interpreter/errors.js";
 import type { ExecutionLimits } from "../../limits.js";
 import {
@@ -524,12 +524,7 @@ export const sedCommand: RuntimeCommand = {
             throw e;
           }
           if (e instanceof ExecutionLimitError) {
-            const message = sanitizeErrorMessage(e.message);
-            return {
-              stdout: "",
-              stderr: `sed: ${message}\n`,
-              exitCode: ExecutionLimitError.EXIT_CODE,
-            };
+            rethrowCommandLimit("sed", e);
           }
           return {
             stdout: "",
@@ -569,12 +564,7 @@ export const sedCommand: RuntimeCommand = {
           throw e;
         }
         if (e instanceof ExecutionLimitError) {
-          const message = sanitizeErrorMessage(e.message);
-          return {
-            stdout: "",
-            stderr: `sed: ${message}\n`,
-            exitCode: ExecutionLimitError.EXIT_CODE,
-          };
+          rethrowCommandLimit("sed", e);
         }
         throw e;
       }
@@ -604,12 +594,7 @@ export const sedCommand: RuntimeCommand = {
             throw e;
           }
           if (e instanceof ExecutionLimitError) {
-            const message = sanitizeErrorMessage(e.message);
-            return {
-              stdout: "",
-              stderr: `sed: ${message}\n`,
-              exitCode: ExecutionLimitError.EXIT_CODE,
-            };
+            rethrowCommandLimit("sed", e);
           }
           return {
             stdout: "",
@@ -651,12 +636,7 @@ export const sedCommand: RuntimeCommand = {
         throw e;
       }
       if (e instanceof ExecutionLimitError) {
-        const message = sanitizeErrorMessage(e.message);
-        return {
-          stdout: "",
-          stderr: `sed: ${message}\n`,
-          exitCode: ExecutionLimitError.EXIT_CODE,
-        };
+        rethrowCommandLimit("sed", e);
       }
       throw e;
     }

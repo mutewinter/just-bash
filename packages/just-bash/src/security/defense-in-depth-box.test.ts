@@ -956,6 +956,28 @@ describeDefense("DefenseInDepthBox", () => {
         expect(error).toBeInstanceOf(SecurityViolationError);
       });
 
+      it("should block modifying an existing process.env key", async () => {
+        process.env.JUST_BASH_ENV_WRITE_TEST = "before";
+        const box = DefenseInDepthBox.getInstance(true);
+        const handle = box.activate();
+
+        let error: Error | undefined;
+        await handle.run(async () => {
+          try {
+            process.env.JUST_BASH_ENV_WRITE_TEST = "bad";
+          } catch (e) {
+            error = e as Error;
+          }
+        });
+
+        handle.deactivate();
+        const value = process.env.JUST_BASH_ENV_WRITE_TEST;
+        delete process.env.JUST_BASH_ENV_WRITE_TEST;
+
+        expect(error).toBeInstanceOf(SecurityViolationError);
+        expect(value).toBe("before");
+      });
+
       it("should allow process.env outside sandbox context", () => {
         const box = DefenseInDepthBox.getInstance(true);
         const handle = box.activate();
@@ -967,13 +989,14 @@ describeDefense("DefenseInDepthBox", () => {
         handle.deactivate();
       });
 
-      it("should only allow writing process.env.DEBUG outside sandbox context", () => {
+      it("should allow writing an existing process.env key outside sandbox context", () => {
         // Regression: the proxy's set trap forwarded `receiver` (the proxy)
         // to Reflect.set, so assignment to an existing key degraded into a
         // value-only defineProperty on the real process.env, which Node
         // rejects with "'process.env' only accepts a configurable, writable,
         // and enumerable data descriptor". Seen via debug/supports-color
-        // (`process.env.DEBUG = ...`) loaded lazily by the `file` command.
+        // (`process.env.DEBUG = ...`) loaded lazily by the `file` command,
+        // and an SDK stamping its version into the environment on each call.
         const originalDebug = process.env.DEBUG;
         process.env.DEBUG = "before";
         process.env.JUST_BASH_ENV_WRITE_TEST = "before";
@@ -982,19 +1005,39 @@ describeDefense("DefenseInDepthBox", () => {
         const handle = box.activate();
 
         process.env.DEBUG = "after";
-        expect(process.env.DEBUG).toBe("after");
-        expect(() => {
-          process.env.JUST_BASH_ENV_WRITE_TEST = "after";
-        }).toThrow();
-        expect(process.env.JUST_BASH_ENV_WRITE_TEST).toBe("before");
+        process.env.JUST_BASH_ENV_WRITE_TEST = "after";
 
         handle.deactivate();
+        const values = [
+          process.env.DEBUG,
+          process.env.JUST_BASH_ENV_WRITE_TEST,
+        ];
         if (originalDebug === undefined) {
           delete process.env.DEBUG;
         } else {
           process.env.DEBUG = originalDebug;
         }
         delete process.env.JUST_BASH_ENV_WRITE_TEST;
+
+        expect(values).toEqual(["after", "after"]);
+      });
+
+      it("should allow trusted code to write an existing process.env key", async () => {
+        process.env.JUST_BASH_ENV_WRITE_TEST = "before";
+        const box = DefenseInDepthBox.getInstance(true);
+        const handle = box.activate();
+
+        await handle.run(async () => {
+          DefenseInDepthBox.runTrusted(() => {
+            process.env.JUST_BASH_ENV_WRITE_TEST = "after";
+          });
+        });
+
+        handle.deactivate();
+        const value = process.env.JUST_BASH_ENV_WRITE_TEST;
+        delete process.env.JUST_BASH_ENV_WRITE_TEST;
+
+        expect(value).toBe("after");
       });
     });
 

@@ -966,10 +966,11 @@ export class DefenseInDepthBox {
           );
           throw new SecurityViolationError(message, violation);
         }
-        // debug/supports-color writes this while loading lazily. Forwarding
-        // the proxy as receiver makes Node reject the resulting value-only
-        // process.env descriptor.
-        if (path === "process.env" && prop === "DEBUG") {
+        // Host code assigns here whenever a library sets its own variable
+        // (debug's DEBUG, an SDK's version stamp). Forwarding the proxy as
+        // receiver turns an assignment to an existing key into a value-only
+        // defineProperty, which Node rejects for process.env.
+        if (path === "process.env") {
           return Reflect.set(target, prop, value);
         }
         return Reflect.set(target, prop, value, receiver);

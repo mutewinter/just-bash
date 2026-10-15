@@ -1,4 +1,5 @@
 import { type ByteString, readBytesFrom } from "../../encoding.js";
+import { DEFAULT_BATCH_SIZE } from "../../utils/constants.js";
 import { ExclusiveCreateUnsupportedError } from "../create-exclusive.js";
 import { InMemoryFs } from "../in-memory-fs/in-memory-fs.js";
 import type {
@@ -520,27 +521,16 @@ export class MountableFs implements IFileSystem {
           entries.set(entry.name, entry);
         }
       } else {
-        // A filesystem that does not implement the listing is asked about
-        // each entry instead, which is what a caller reaching past this one
-        // would have had to do. lstat answers for the entry itself, as a
-        // directory listing reports it, so a link is a link whether or not
-        // what it points at is still there; an entry that cannot be answered
-        // for at all is still in the directory, and is listed with no type.
         for (const name of await fs.readdir(relativePath)) {
-          let entry: FsStat | undefined;
-          try {
-            entry = await fs.lstat(joinPath(relativePath, name));
-          } catch {
-            entry = undefined;
-          }
           entries.set(name, {
             name,
-            isFile: entry?.isFile ?? false,
-            isDirectory: entry?.isDirectory ?? false,
-            isSymbolicLink: entry?.isSymbolicLink ?? false,
+            isFile: false,
+            isDirectory: false,
+            isSymbolicLink: false,
           });
         }
       }
+      await this.resolveUntypedEntries(fs, relativePath, entries);
     } catch (err) {
       // Path might not exist in base FS if only mount points are there
       const code = (err as { code?: string }).code;
@@ -571,6 +561,46 @@ export class MountableFs implements IFileSystem {
     return Array.from(entries.values()).sort((left, right) =>
       left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
     );
+  }
+
+  /**
+   * Fills in the entries whose type the listing did not give: every entry of
+   * a filesystem that implements no `readdirWithFileTypes`, and the ones a
+   * host answered `DT_UNKNOWN` for, which Node reports as all three
+   * predicates false (NFS and FUSE do this). Without it `find`, `ls -R`,
+   * `du` and `tree` read a real directory as something not to descend into.
+   *
+   * Asked in batches, as the callers that did this for themselves do, so a
+   * filesystem answering over a network is not asked one entry at a time. An
+   * entry that cannot be answered for is left out of the listing, as those
+   * callers also leave it out; one that answers as none of the three (a
+   * FIFO, a socket) keeps that answer rather than being asked again.
+   */
+  private async resolveUntypedEntries(
+    fs: IFileSystem,
+    dir: string,
+    entries: Map<string, DirentEntry>,
+  ): Promise<void> {
+    const untyped = Array.from(entries.values()).filter(
+      (entry) => !entry.isFile && !entry.isDirectory && !entry.isSymbolicLink,
+    );
+    for (let at = 0; at < untyped.length; at += DEFAULT_BATCH_SIZE) {
+      await Promise.all(
+        untyped.slice(at, at + DEFAULT_BATCH_SIZE).map(async ({ name }) => {
+          try {
+            const stat = await fs.lstat(joinPath(dir, name));
+            entries.set(name, {
+              name,
+              isFile: stat.isFile,
+              isDirectory: stat.isDirectory,
+              isSymbolicLink: stat.isSymbolicLink,
+            });
+          } catch {
+            entries.delete(name);
+          }
+        }),
+      );
+    }
   }
 
   async rm(path: string, options?: RmOptions): Promise<void> {

@@ -1022,6 +1022,23 @@ describeDefense("DefenseInDepthBox", () => {
         expect(values).toEqual(["after", "after"]);
       });
 
+      it("should keep a write through an object inheriting process.env on that object", () => {
+        process.env.JUST_BASH_ENV_WRITE_TEST = "before";
+        const box = DefenseInDepthBox.getInstance(true);
+        const handle = box.activate();
+
+        const child = Object.create(process.env) as Record<string, string>;
+        child.JUST_BASH_ENV_WRITE_TEST = "child";
+
+        handle.deactivate();
+        const own = Object.hasOwn(child, "JUST_BASH_ENV_WRITE_TEST");
+        const value = process.env.JUST_BASH_ENV_WRITE_TEST;
+        delete process.env.JUST_BASH_ENV_WRITE_TEST;
+
+        expect(own).toBe(true);
+        expect(value).toBe("before");
+      });
+
       it("should allow trusted code to write an existing process.env key", async () => {
         process.env.JUST_BASH_ENV_WRITE_TEST = "before";
         const box = DefenseInDepthBox.getInstance(true);
@@ -1473,6 +1490,34 @@ describeDefense("DefenseInDepthBox", () => {
       expect(violations.length).toBeGreaterThan(0);
       expect(violations[0].type).toBe("function_constructor");
       expect(violations[0].message).toContain("audit mode");
+    });
+
+    it("should log a process.env write it lets through", async () => {
+      process.env.JUST_BASH_ENV_WRITE_TEST = "before";
+      const violations: SecurityViolation[] = [];
+      const box = DefenseInDepthBox.getInstance({
+        enabled: true,
+        auditMode: true,
+        onViolation: (v) => violations.push(v),
+      });
+      const handle = box.activate();
+
+      await handle.run(async () => {
+        process.env.JUST_BASH_ENV_WRITE_TEST = "after";
+      });
+
+      handle.deactivate();
+      const value = process.env.JUST_BASH_ENV_WRITE_TEST;
+      delete process.env.JUST_BASH_ENV_WRITE_TEST;
+
+      expect(value).toBe("after");
+      expect(
+        violations.some(
+          (v) =>
+            v.path === "process.env.JUST_BASH_ENV_WRITE_TEST" &&
+            v.message.includes("modification"),
+        ),
+      ).toBe(true);
     });
   });
 

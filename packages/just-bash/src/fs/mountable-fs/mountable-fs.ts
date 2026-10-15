@@ -5,6 +5,7 @@ import type {
   BufferEncoding,
   CpOptions,
   CreateExclusiveOptions,
+  DirentEntry,
   FileContent,
   FsStat,
   IFileSystem,
@@ -499,6 +500,77 @@ export class MountableFs implements IFileSystem {
     }
 
     return Array.from(entries).sort();
+  }
+
+  /**
+   * Read directory contents with type information, so a walk does not stat
+   * every entry. The owning filesystem answers with its own types where it
+   * has them, and mount points are directories of their own.
+   */
+  async readdirWithFileTypes(path: string): Promise<DirentEntry[]> {
+    const normalized = normalizePath(path);
+    const entries = new Map<string, DirentEntry>();
+    let readdirError: Error | null = null;
+
+    // Get entries from the owning filesystem
+    const { fs, relativePath } = this.routePath(path);
+    try {
+      if (fs.readdirWithFileTypes) {
+        for (const entry of await fs.readdirWithFileTypes(relativePath)) {
+          entries.set(entry.name, entry);
+        }
+      } else {
+        // A filesystem that does not implement the listing is asked about
+        // each entry instead, which is what a caller reaching past this one
+        // would have had to do. lstat answers for the entry itself, as a
+        // directory listing reports it, so a link is a link whether or not
+        // what it points at is still there; an entry that cannot be answered
+        // for at all is still in the directory, and is listed with no type.
+        for (const name of await fs.readdir(relativePath)) {
+          let entry: FsStat | undefined;
+          try {
+            entry = await fs.lstat(joinPath(relativePath, name));
+          } catch {
+            entry = undefined;
+          }
+          entries.set(name, {
+            name,
+            isFile: entry?.isFile ?? false,
+            isDirectory: entry?.isDirectory ?? false,
+            isSymbolicLink: entry?.isSymbolicLink ?? false,
+          });
+        }
+      }
+    } catch (err) {
+      // Path might not exist in base FS if only mount points are there
+      const code = (err as { code?: string }).code;
+      const message = (err as { message?: string }).message || "";
+
+      if (code !== "ENOENT" && !message.includes("ENOENT")) {
+        throw err;
+      }
+      // Save error to throw later if no mount points provide entries
+      readdirError = err as Error;
+    }
+
+    // Add mount points that are immediate children
+    for (const child of this.getChildMountPoints(normalized)) {
+      entries.set(child, {
+        name: child,
+        isFile: false,
+        isDirectory: true,
+        isSymbolicLink: false,
+      });
+    }
+
+    // If no entries found and we had an error, throw the original error
+    if (entries.size === 0 && readdirError && !this.mounts.has(normalized)) {
+      throw readdirError;
+    }
+
+    return Array.from(entries.values()).sort((left, right) =>
+      left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+    );
   }
 
   async rm(path: string, options?: RmOptions): Promise<void> {

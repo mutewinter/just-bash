@@ -128,6 +128,23 @@ describe("bash/sh options", () => {
   });
 
   it.each([
+    "bash -o bogus",
+    "bash -O bogus",
+  ])("refuses %s with no script at status 2", async (command) => {
+    const result = await run(command);
+    expect(result.stderr).toContain("bogus");
+    expect(result.exitCode).toBe(2);
+  });
+
+  it("takes a shopt name with digits", async () => {
+    expect(await run("bash -O compat31 -c 'echo ran'")).toEqual({
+      stdout: "ran\n",
+      stderr: "",
+      exitCode: 0,
+    });
+  });
+
+  it.each([
     "bash --version",
     "sh --version",
     "bash -l --version",

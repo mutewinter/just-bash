@@ -70,7 +70,7 @@ const IGNORED_LONG_OPTIONS = new Set([
   "--norc",
 ]);
 const LONG_OPTIONS_WITH_VALUE = new Set(["--init-file", "--rcfile"]);
-const OPTION_NAME = /^[A-Za-z][A-Za-z_-]*$/;
+const OPTION_NAME = /^[A-Za-z][A-Za-z0-9_-]*$/;
 
 interface Invocation {
   /** `-c`: the first operand is the script, the second `$0`. */
@@ -217,7 +217,11 @@ async function runShell(
     if (stdinText.trim()) {
       return executeScript(stdinText, shell, operands, ctx, setup, shell);
     }
-    // No stdin - return success (interactive mode not supported)
+    // No stdin - interactive mode is not supported, but the options still
+    // apply, so one set or shopt refuses still ends the shell with status 2.
+    if (setup.length > 0) {
+      return executeScript("", shell, operands, ctx, setup, shell);
+    }
     return { stdout: "", stderr: "", exitCode: 0 };
   }
 
